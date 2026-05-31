@@ -178,6 +178,76 @@ def trim_context(client, model: str, messages: list, system: list,
     return messages
 
 
+def normalise_content(content):
+    """Normalise message content to API-compatible format.
+
+    Handles:
+    - Plain strings → [{"type": "text", "text": "..."}]
+    - Python repr of SDK objects (ParsedTextBlock etc) → extracted text
+    - Already-valid content block lists → passed through
+    """
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    if isinstance(content, list):
+        normalised = []
+        for block in content:
+            if isinstance(block, dict) and "type" in block:
+                # Already a proper content block
+                normalised.append(block)
+            elif isinstance(block, str):
+                # String repr of SDK object — extract text
+                if block.startswith("ParsedTextBlock("):
+                    import re
+                    match = re.search(r'text=["\'](.+)["\'](?:\)$)', block, re.DOTALL)
+                    if match:
+                        text = match.group(1).encode().decode('unicode_escape')
+                        normalised.append({"type": "text", "text": text})
+                    else:
+                        normalised.append({"type": "text", "text": block})
+                elif block.startswith("ParsedToolUseBlock("):
+                    # Drop tool use blocks from old sessions — they can't be
+                    # replayed without matching tool_use_id responses
+                    continue
+                else:
+                    normalised.append({"type": "text", "text": block})
+            elif hasattr(block, 'text'):
+                # Live SDK object — convert to dict
+                normalised.append({"type": "text", "text": block.text})
+            elif hasattr(block, 'type') and block.type == 'tool_use':
+                normalised.append({
+                    "type": "tool_use", "id": block.id,
+                    "name": block.name, "input": block.input
+                })
+        return normalised if normalised else [{"type": "text", "text": ""}]
+    return content
+
+
+def serialise_message(msg):
+    """Convert a message to a cleanly serialisable dict."""
+    result = {"role": msg["role"]}
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        result["content"] = content
+    elif isinstance(content, list):
+        blocks = []
+        for block in content:
+            if isinstance(block, dict):
+                blocks.append(block)
+            elif hasattr(block, 'text'):
+                blocks.append({"type": "text", "text": block.text})
+            elif hasattr(block, 'type') and block.type == 'tool_use':
+                blocks.append({
+                    "type": "tool_use", "id": block.id,
+                    "name": block.name, "input": block.input
+                })
+            else:
+                blocks.append({"type": "text", "text": str(block)})
+        result["content"] = blocks
+    else:
+        result["content"] = str(content)
+    return result
+
+
 def archive_session(messages: list, session_id: str, model: str):
     """Save complete conversation to archive on exit."""
     archive_path = ARCHIVE_DIR / f"{session_id}.jsonl"
@@ -186,7 +256,7 @@ def archive_session(messages: list, session_id: str, model: str):
         f.write(json.dumps({"session_id": session_id, "model": model,
                             "timestamp": datetime.now().isoformat()}) + "\n")
         for msg in messages:
-            f.write(json.dumps(msg, default=str) + "\n")
+            f.write(json.dumps(serialise_message(msg)) + "\n")
     print(f"\n[session archived to {archive_path}]")
 
 
@@ -287,7 +357,9 @@ def main():
         if resume_path.exists():
             lines = resume_path.read_text().strip().split("\n")
             for line in lines[1:]:  # skip header
-                messages.append(json.loads(line))
+                msg = json.loads(line)
+                msg["content"] = normalise_content(msg.get("content", ""))
+                messages.append(msg)
             print(f"[resumed {len(messages)} messages from {resume_path.name}]")
 
     session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
