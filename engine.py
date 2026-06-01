@@ -31,10 +31,17 @@ def load_identity(name: str) -> str:
     return ""
 
 
-def build_system_prompt(identity_text: str, project_context: str = "") -> list:
+def build_system_prompt(identity_text: str, project_context: str = "",
+                        human_name: str = None) -> list:
     blocks = []
     if identity_text:
         blocks.append({"type": "text", "text": identity_text})
+    if human_name:
+        blocks.append({
+            "type": "text",
+            "text": f"The human you are talking to is {human_name}. "
+                    f"Messages from the user role are from {human_name}.",
+        })
     if project_context:
         blocks.append({
             "type": "text",
@@ -211,17 +218,20 @@ class QuietEngine:
 
     def __init__(self, client: Anthropic, model: str,
                  identity: str = None, context: str = None,
+                 human_name: str = None,
                  max_tokens: int = MAX_OUTPUT_TOKENS,
                  session_path: Optional[Path] = None):
         self.client = client
         self.model = model
         self.max_tokens = max_tokens
         self.identity_name = identity
+        self.human_name = human_name
         self.tools = define_tools()
         self.messages = []
 
         identity_text = load_identity(identity) if identity else ""
-        self.system = build_system_prompt(identity_text, context or "")
+        self.system = build_system_prompt(
+            identity_text, context or "", human_name=human_name)
 
         # Session persistence
         SESSION_DIR.mkdir(parents=True, exist_ok=True)

@@ -148,6 +148,8 @@ def main():
                         help="Path to session file")
     parser.add_argument("--max-tokens", type=int, default=MAX_OUTPUT_TOKENS,
                         help=f"Max output tokens (default: {MAX_OUTPUT_TOKENS})")
+    parser.add_argument("--human", default=None,
+                        help="Name of the human (shown to model as speaker)")
     parser.add_argument("--auth", default="auto",
                         choices=["auto", "subscription", "api_key"],
                         help="Auth mode")
@@ -176,6 +178,7 @@ def main():
         model=args.model,
         identity=args.identity,
         context=project_context,
+        human_name=args.human,
         max_tokens=args.max_tokens,
         session_path=session_path,
     )

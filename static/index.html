@@ -163,7 +163,7 @@
   <form id="input-form">
     <textarea id="input-text" placeholder="Type a message..." rows="1"
               autofocus></textarea>
-    <button type="submit" id="send-btn">Send</button>
+    <button type="button" id="send-btn">Send</button>
   </form>
 </div>
 
@@ -187,7 +187,7 @@ inputEl.addEventListener('input', () => {
 inputEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
-    if (!streaming) form.dispatchEvent(new Event('submit'));
+    if (!streaming) sendMessage();
   }
 });
 
@@ -236,9 +236,27 @@ function scrollToBottom() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+// Parse SSE lines from a text chunk, handling partial lines across chunks
+function parseSSE(text, callback) {
+  const lines = text.split('\n');
+  let currentEvent = null;
+  for (const line of lines) {
+    if (line.startsWith('event: ')) {
+      currentEvent = line.slice(7).trim();
+    } else if (line.startsWith('data: ') && currentEvent) {
+      try {
+        const data = JSON.parse(line.slice(6));
+        callback(currentEvent, data);
+      } catch (e) {
+        console.error('SSE parse error:', e, line);
+      }
+      currentEvent = null;
+    }
+  }
+}
+
 // Send message
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
+async function sendMessage() {
   const text = inputEl.value.trim();
   if (!text || streaming) return;
 
@@ -262,51 +280,45 @@ form.addEventListener('submit', async (e) => {
       body: JSON.stringify({ message: text }),
     });
 
+    if (!resp.ok) {
+      assistantDiv.textContent = `[server error: ${resp.status}]`;
+      return;
+    }
+
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
-    let buffer = '';
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (line.startsWith('event: ')) {
-          var eventType = line.slice(7);
-        } else if (line.startsWith('data: ') && eventType) {
-          const data = JSON.parse(line.slice(6));
-
-          if (eventType === 'text') {
-            assistantDiv.textContent += data;
-            scrollToBottom();
-          } else if (eventType === 'tool' || eventType === 'tool_result') {
-            // Show tool activity inline
-            const toolDiv = addMessage('tool', data);
-            scrollToBottom();
-          } else if (eventType === 'error') {
-            assistantDiv.textContent += `\n[error: ${data}]`;
-            scrollToBottom();
-          } else if (eventType === 'done') {
-            // Done
-          }
-          eventType = null;
+      const chunk = decoder.decode(value, { stream: true });
+      parseSSE(chunk, (eventType, data) => {
+        if (eventType === 'text') {
+          assistantDiv.textContent += data;
+          scrollToBottom();
+        } else if (eventType === 'tool' || eventType === 'tool_result') {
+          addMessage('tool', data);
+          scrollToBottom();
+        } else if (eventType === 'error') {
+          assistantDiv.textContent += `\n[error: ${data}]`;
+          scrollToBottom();
         }
-      }
+      });
     }
   } catch (e) {
     assistantDiv.textContent += `\n[connection error: ${e.message}]`;
+  } finally {
+    assistantDiv.classList.remove('streaming');
+    streaming = false;
+    sendBtn.disabled = false;
+    inputEl.focus();
+    loadInfo();
   }
+}
 
-  assistantDiv.classList.remove('streaming');
-  streaming = false;
-  sendBtn.disabled = false;
-  inputEl.focus();
-  loadInfo();  // refresh token count
-});
+form.addEventListener('submit', (e) => { e.preventDefault(); sendMessage(); });
+sendBtn.addEventListener('click', () => sendMessage());
 
 // Init
 loadInfo();

@@ -45,6 +45,8 @@ def main():
     parser.add_argument("--auth", default="auto",
                         choices=["auto", "subscription", "api_key"],
                         help="Auth mode")
+    parser.add_argument("--human", default=None,
+                        help="Name of the human (shown to model as speaker)")
     parser.add_argument("--world", default=None,
                         help="Path to world YAML (enables Garden)")
     parser.add_argument("--who", default=None,
@@ -77,6 +79,7 @@ def main():
         model=args.model,
         identity=args.identity,
         context=project_context,
+        human_name=args.human,
         max_tokens=args.max_tokens,
         session_path=session_path,
     )
