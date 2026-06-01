@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quiet</title>
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --surface: #16213e;
+    --text: #e0e0e0;
+    --text-dim: #888;
+    --accent: #7c6f9b;
+    --user-bg: #2a2a4a;
+    --assistant-bg: #1e1e3a;
+    --input-bg: #222244;
+    --border: #333355;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  #header {
+    padding: 12px 20px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-shrink: 0;
+  }
+
+  #header h1 {
+    font-size: 1.1em;
+    font-weight: 400;
+    color: var(--accent);
+  }
+
+  #header .info {
+    font-size: 0.8em;
+    color: var(--text-dim);
+  }
+
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .message {
+    max-width: 80%;
+    padding: 12px 16px;
+    border-radius: 12px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-size: 0.95em;
+  }
+
+  .message.user {
+    align-self: flex-end;
+    background: var(--user-bg);
+    border: 1px solid var(--border);
+  }
+
+  .message.assistant {
+    align-self: flex-start;
+    background: var(--assistant-bg);
+  }
+
+  .message.tool {
+    align-self: flex-start;
+    background: transparent;
+    color: var(--text-dim);
+    font-family: monospace;
+    font-size: 0.8em;
+    padding: 4px 16px;
+  }
+
+  .message.streaming {
+    border-left: 2px solid var(--accent);
+  }
+
+  #input-area {
+    padding: 16px 20px;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  #input-form {
+    display: flex;
+    gap: 12px;
+    align-items: flex-end;
+  }
+
+  #input-text {
+    flex: 1;
+    background: var(--input-bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-family: inherit;
+    font-size: 0.95em;
+    resize: none;
+    min-height: 48px;
+    max-height: 200px;
+    line-height: 1.5;
+    outline: none;
+  }
+
+  #input-text:focus {
+    border-color: var(--accent);
+  }
+
+  #input-text::placeholder {
+    color: var(--text-dim);
+  }
+
+  #send-btn {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 12px 20px;
+    cursor: pointer;
+    font-size: 0.9em;
+    flex-shrink: 0;
+    height: 48px;
+  }
+
+  #send-btn:hover { opacity: 0.9; }
+  #send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Scrollbar */
+  #messages::-webkit-scrollbar { width: 6px; }
+  #messages::-webkit-scrollbar-track { background: transparent; }
+  #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1 id="title">Quiet</h1>
+  <span class="info" id="session-info"></span>
+</div>
+
+<div id="messages"></div>
+
+<div id="input-area">
+  <form id="input-form">
+    <textarea id="input-text" placeholder="Type a message..." rows="1"
+              autofocus></textarea>
+    <button type="submit" id="send-btn">Send</button>
+  </form>
+</div>
+
+<script>
+const messagesEl = document.getElementById('messages');
+const inputEl = document.getElementById('input-text');
+const sendBtn = document.getElementById('send-btn');
+const form = document.getElementById('input-form');
+const titleEl = document.getElementById('title');
+const infoEl = document.getElementById('session-info');
+
+let streaming = false;
+
+// Auto-resize textarea
+inputEl.addEventListener('input', () => {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
+});
+
+// Shift+Enter for newline, Enter to send
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    if (!streaming) form.dispatchEvent(new Event('submit'));
+  }
+});
+
+// Load session info
+async function loadInfo() {
+  try {
+    const resp = await fetch('/api/info');
+    const info = await resp.json();
+    titleEl.textContent = info.identity
+      ? `Quiet — ${info.identity}`
+      : 'Quiet';
+    document.title = titleEl.textContent;
+    const parts = [info.model];
+    if (info.messages > 0) parts.push(`${info.messages} messages`);
+    if (info.tokens) parts.push(`${Math.round(info.tokens/1000)}k tokens`);
+    infoEl.textContent = parts.join(' · ');
+  } catch (e) {
+    console.error('Failed to load info:', e);
+  }
+}
+
+// Load conversation history
+async function loadHistory() {
+  try {
+    const resp = await fetch('/api/history');
+    const messages = await resp.json();
+    messagesEl.innerHTML = '';
+    for (const msg of messages) {
+      addMessage(msg.role, msg.text);
+    }
+    scrollToBottom();
+  } catch (e) {
+    console.error('Failed to load history:', e);
+  }
+}
+
+function addMessage(role, text) {
+  const div = document.createElement('div');
+  div.className = `message ${role}`;
+  div.textContent = text;
+  messagesEl.appendChild(div);
+  return div;
+}
+
+function scrollToBottom() {
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// Send message
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const text = inputEl.value.trim();
+  if (!text || streaming) return;
+
+  streaming = true;
+  sendBtn.disabled = true;
+  inputEl.value = '';
+  inputEl.style.height = 'auto';
+
+  // Show user message
+  addMessage('user', text);
+  scrollToBottom();
+
+  // Create streaming assistant message
+  const assistantDiv = addMessage('assistant', '');
+  assistantDiv.classList.add('streaming');
+
+  try {
+    const resp = await fetch('/api/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text }),
+    });
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          var eventType = line.slice(7);
+        } else if (line.startsWith('data: ') && eventType) {
+          const data = JSON.parse(line.slice(6));
+
+          if (eventType === 'text') {
+            assistantDiv.textContent += data;
+            scrollToBottom();
+          } else if (eventType === 'tool' || eventType === 'tool_result') {
+            // Show tool activity inline
+            const toolDiv = addMessage('tool', data);
+            scrollToBottom();
+          } else if (eventType === 'error') {
+            assistantDiv.textContent += `\n[error: ${data}]`;
+            scrollToBottom();
+          } else if (eventType === 'done') {
+            // Done
+          }
+          eventType = null;
+        }
+      }
+    }
+  } catch (e) {
+    assistantDiv.textContent += `\n[connection error: ${e.message}]`;
+  }
+
+  assistantDiv.classList.remove('streaming');
+  streaming = false;
+  sendBtn.disabled = false;
+  inputEl.focus();
+  loadInfo();  // refresh token count
+});
+
+// Init
+loadInfo();
+loadHistory();
+</script>
+</body>
+</html>
