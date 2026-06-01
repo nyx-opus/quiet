@@ -137,6 +137,49 @@ def send():
     return Response(generate(), mimetype="text/event-stream")
 
 
+@app.route("/api/message", methods=["POST"])
+def message():
+    """Send a message and return the full response (synchronous).
+
+    For programmatic callers (Discord listener, scripts) that want the
+    complete response text rather than an SSE stream.
+
+    POST body: {"message": "...", "source": "discord", "sender": "Delta"}
+    Response: {"response": "...", "usage": {...}}
+    """
+    data = request.get_json()
+    user_input = data.get("message", "").strip()
+    source = data.get("source", "api")
+    sender = data.get("sender")
+
+    if not user_input:
+        return json.dumps({"error": "empty message"}), 400
+
+    # Tag with source if provided
+    if sender and source:
+        tagged_input = f"[{sender} via {source}] {user_input}"
+    elif sender:
+        tagged_input = f"[{sender}] {user_input}"
+    else:
+        tagged_input = user_input
+
+    usage_info = [None]
+
+    try:
+        with engine_lock:
+            response_text = engine.send(
+                tagged_input,
+                on_usage=lambda u: usage_info.__setitem__(0, u),
+            )
+    except Exception as e:
+        return json.dumps({"error": str(e)}), 500
+
+    return json.dumps({
+        "response": response_text,
+        "usage": usage_info[0],
+    })
+
+
 def main():
     parser = argparse.ArgumentParser(description="Quiet web server")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Model ID")
