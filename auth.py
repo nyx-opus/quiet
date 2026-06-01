@@ -6,9 +6,15 @@ and provides an AccessTokenProvider that handles automatic token refresh.
 """
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Optional
+
+# Quiet is an interactive chat client. When using subscription auth, identify
+# as CLI (interactive) rather than SDK (automated) so traffic is classified
+# correctly. See: https://github.com/nimbalyst/nimbalyst/issues/174
+os.environ.setdefault("CLAUDE_CODE_ENTRYPOINT", "cli")
 
 import httpx
 from anthropic.lib.credentials._types import AccessToken
