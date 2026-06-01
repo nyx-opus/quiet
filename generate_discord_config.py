@@ -24,6 +24,8 @@ def main():
                         help="Path to claude-autonomy-platform")
     parser.add_argument("--port", type=int, default=8090,
                         help="Quiet web server port")
+    parser.add_argument("--identity", default=None,
+                        help="Claude's name (for detecting sibling channels)")
     parser.add_argument("-o", "--output", default="discord_config.json",
                         help="Output path")
     args = parser.parse_args()
@@ -75,9 +77,17 @@ def main():
         access = json.loads(access_file.read_text())
         dm_allow = access.get("allowFrom", [])
 
+        # Get identity name for detecting sibling channels
+        identity = args.identity or ""
+
         for group_id in access.get("groups", {}):
             name = name_lookup.get(group_id, f"channel-{group_id}")
-            channels[group_id] = {"name": name}
+            # Sibling channels (contain the Claude's name) are direct,
+            # everything else is ambient
+            is_sibling = (identity and identity in name and
+                          name != identity)  # "nyx-apple" but not "nyx"
+            mode = "direct" if is_sibling else "ambient"
+            channels[group_id] = {"name": name, "mode": mode}
 
     config = {
         "token": token,
