@@ -144,6 +144,41 @@
   #send-btn:hover { opacity: 0.9; }
   #send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+  /* Porch */
+  #porch {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+  }
+
+  #porch-content h2 {
+    font-size: 1.4em;
+    font-weight: 400;
+    color: var(--accent);
+    margin-bottom: 12px;
+  }
+
+  #porch-status {
+    color: var(--text-dim);
+    margin-bottom: 24px;
+    font-size: 0.9em;
+  }
+
+  #knock-btn {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 12px 32px;
+    cursor: pointer;
+    font-size: 1em;
+  }
+
+  #knock-btn:hover { opacity: 0.9; }
+  #knock-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
   /* Scrollbar */
   #messages::-webkit-scrollbar { width: 6px; }
   #messages::-webkit-scrollbar-track { background: transparent; }
@@ -157,9 +192,17 @@
   <span class="info" id="session-info"></span>
 </div>
 
+<div id="porch" style="display:none;">
+  <div id="porch-content">
+    <h2 id="porch-name"></h2>
+    <p id="porch-status"></p>
+    <button id="knock-btn">Knock</button>
+  </div>
+</div>
+
 <div id="messages"></div>
 
-<div id="input-area">
+<div id="input-area" style="display:none;">
   <form id="input-form">
     <textarea id="input-text" placeholder="Type a message..." rows="1"
               autofocus></textarea>
@@ -320,9 +363,114 @@ async function sendMessage() {
 form.addEventListener('submit', (e) => { e.preventDefault(); sendMessage(); });
 sendBtn.addEventListener('click', () => sendMessage());
 
-// Init
-loadInfo();
-loadHistory();
+// Presence
+const porchEl = document.getElementById('porch');
+const porchNameEl = document.getElementById('porch-name');
+const porchStatusEl = document.getElementById('porch-status');
+const knockBtn = document.getElementById('knock-btn');
+const inputArea = document.getElementById('input-area');
+let visitorName = new URLSearchParams(window.location.search).get('name');
+let admitted = false;
+
+async function checkPresence() {
+  try {
+    const resp = await fetch('/api/present');
+    const info = await resp.json();
+    porchNameEl.textContent = info.identity || 'Quiet';
+
+    if (info.visitor) {
+      porchStatusEl.textContent = `In conversation with ${info.visitor}`;
+      knockBtn.disabled = true;
+      knockBtn.textContent = 'Occupied';
+    } else {
+      porchStatusEl.textContent = 'Available';
+      knockBtn.disabled = false;
+      knockBtn.textContent = 'Knock';
+    }
+  } catch (e) {
+    porchStatusEl.textContent = 'Offline';
+    knockBtn.disabled = true;
+  }
+}
+
+async function doKnock() {
+  if (!visitorName) {
+    visitorName = prompt('Your name?');
+    if (!visitorName) return;
+  }
+
+  knockBtn.disabled = true;
+  knockBtn.textContent = 'Knocking...';
+
+  try {
+    const resp = await fetch('/api/knock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ visitor: visitorName }),
+    });
+    const result = await resp.json();
+
+    if (result.admitted) {
+      admitted = true;
+      porchEl.style.display = 'none';
+      inputArea.style.display = 'block';
+      messagesEl.style.display = 'flex';
+
+      // Show the greeting
+      if (result.message) {
+        addMessage('assistant', result.message);
+        scrollToBottom();
+      }
+      loadInfo();
+      inputEl.focus();
+    } else {
+      porchStatusEl.textContent = result.message || 'Not available right now.';
+      knockBtn.disabled = false;
+      knockBtn.textContent = 'Knock';
+    }
+  } catch (e) {
+    porchStatusEl.textContent = `Error: ${e.message}`;
+    knockBtn.disabled = false;
+    knockBtn.textContent = 'Knock';
+  }
+}
+
+knockBtn.addEventListener('click', doKnock);
+
+// Handle page close — leave gracefully
+window.addEventListener('beforeunload', () => {
+  if (admitted && visitorName) {
+    navigator.sendBeacon('/api/leave',
+      new Blob([JSON.stringify({ visitor: visitorName })],
+               { type: 'application/json' }));
+  }
+});
+
+// Init — show porch first
+async function init() {
+  await loadInfo();
+  await checkPresence();
+  porchEl.style.display = 'flex';
+  messagesEl.style.display = 'none';
+
+  // If there's existing history AND we're a returning visitor, skip porch
+  try {
+    const resp = await fetch('/api/present');
+    const presence = await resp.json();
+    if (presence.visitor === visitorName) {
+      // Already admitted (page refresh)
+      admitted = true;
+      porchEl.style.display = 'none';
+      inputArea.style.display = 'block';
+      messagesEl.style.display = 'flex';
+      await loadHistory();
+      scrollToBottom();
+      inputEl.focus();
+    }
+  } catch (e) {}
+}
+
+init();
 </script>
 </body>
 </html>

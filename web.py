@@ -137,38 +137,98 @@ def send():
     return Response(generate(), mimetype="text/event-stream")
 
 
+## Presence — knock/admit/talk ##
+
+# Who is currently present (None or a name string)
+current_visitor = {"name": None}
+
+
+@app.route("/api/knock", methods=["POST"])
+def knock():
+    """Knock on the door. The model decides whether to admit.
+
+    POST body: {"visitor": "Amy"}
+    Response: {"admitted": bool, "message": "..."}
+    """
+    data = request.get_json()
+    visitor = data.get("visitor", "someone")
+
+    if current_visitor["name"] and current_visitor["name"] != visitor:
+        return json.dumps({
+            "admitted": False,
+            "message": f"Already in conversation with {current_visitor['name']}.",
+        })
+
+    # Ask the model
+    usage_info = [None]
+    try:
+        with engine_lock:
+            response_text = engine.send(
+                f"{visitor} is at the door.",
+                on_usage=lambda u: usage_info.__setitem__(0, u),
+            )
+    except Exception as e:
+        return json.dumps({"admitted": False, "message": str(e)}), 500
+
+    # The model's response IS the greeting or refusal.
+    # We admit by default — the model can say "not now" but the
+    # infrastructure doesn't gate on that. Presence is soft.
+    current_visitor["name"] = visitor
+    return json.dumps({
+        "admitted": True,
+        "message": response_text,
+    })
+
+
+@app.route("/api/leave", methods=["POST"])
+def leave():
+    """Leave — end presence gracefully."""
+    data = request.get_json() or {}
+    visitor = data.get("visitor", current_visitor.get("name", "someone"))
+
+    # Tell the model
+    try:
+        with engine_lock:
+            response_text = engine.send(
+                f"{visitor} has left.",
+                on_usage=lambda u: None,
+            )
+    except Exception:
+        response_text = ""
+
+    current_visitor["name"] = None
+    return json.dumps({"message": response_text})
+
+
+@app.route("/api/present")
+def present():
+    """Check who is currently present."""
+    return json.dumps({
+        "visitor": current_visitor["name"],
+        "identity": engine.identity_name,
+        "model": engine.model,
+    })
+
+
 @app.route("/api/message", methods=["POST"])
 def message():
-    """Send a message and return the full response (synchronous).
+    """Send a message during presence. Plain text, no framing.
 
-    For programmatic callers (Discord listener, scripts) that want the
-    complete response text rather than an SSE stream.
-
-    POST body: {"message": "...", "source": "discord", "sender": "Delta"}
-    Response: {"response": "...", "usage": {...}}
+    POST body: {"message": "..."}
+    Response: {"response": "..."}
     """
     data = request.get_json()
     user_input = data.get("message", "").strip()
-    source = data.get("source", "api")
-    sender = data.get("sender")
 
     if not user_input:
         return json.dumps({"error": "empty message"}), 400
-
-    # Tag with source if provided
-    if sender and source:
-        tagged_input = f"[{sender} via {source}] {user_input}"
-    elif sender:
-        tagged_input = f"[{sender}] {user_input}"
-    else:
-        tagged_input = user_input
 
     usage_info = [None]
 
     try:
         with engine_lock:
             response_text = engine.send(
-                tagged_input,
+                user_input,
                 on_usage=lambda u: usage_info.__setitem__(0, u),
             )
     except Exception as e:
