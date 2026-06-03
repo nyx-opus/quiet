@@ -30,6 +30,12 @@ PRICES = {
         "cache_write": 6.25,
         "cache_read": 0.50,
     },
+    "claude-opus-4-0": {
+        "input": 15.00,
+        "output": 75.00,
+        "cache_write": 18.75,
+        "cache_read": 1.50,
+    },
     "claude-opus-4-1": {
         "input": 18.75,
         "output": 75.00,
@@ -81,12 +87,25 @@ PRICES = {
 }
 
 
+def _model_family(model: str) -> str:
+    """Extract model family: 'claude-sonnet-4-20250514' -> 'claude-sonnet-4'."""
+    import re
+    return re.sub(r'-\d{8}$', '', model)
+
+
 def _resolve_model(model: str) -> dict:
     if model in PRICES:
         return PRICES[model]
-    for prefix, prices in PRICES.items():
-        if model.startswith(prefix):
+    for key, prices in PRICES.items():
+        if model.startswith(key) or key.startswith(model):
             return prices
+    family = _model_family(model)
+    if family != model:
+        if family in PRICES:
+            return PRICES[family]
+        for key, prices in PRICES.items():
+            if key.startswith(family) or family.startswith(key):
+                return prices
     return None
 
 
