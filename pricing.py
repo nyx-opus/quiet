@@ -87,25 +87,22 @@ PRICES = {
 }
 
 
-def _model_family(model: str) -> str:
-    """Extract model family: 'claude-sonnet-4-20250514' -> 'claude-sonnet-4'."""
-    import re
-    return re.sub(r'-\d{8}$', '', model)
+ALIASES = {
+    "claude-opus-4-20250514": "claude-opus-4-0",
+    "claude-sonnet-4-20250514": "claude-sonnet-4-0",
+}
 
 
 def _resolve_model(model: str) -> dict:
     if model in PRICES:
         return PRICES[model]
-    for key, prices in PRICES.items():
-        if model.startswith(key) or key.startswith(model):
-            return prices
-    family = _model_family(model)
-    if family != model:
-        if family in PRICES:
-            return PRICES[family]
-        for key, prices in PRICES.items():
-            if key.startswith(family) or family.startswith(key):
-                return prices
+    if model in ALIASES:
+        return PRICES[ALIASES[model]]
+    # Try prefix match, prefer longest key to avoid claude-opus-4 matching 4-8
+    matches = [(key, prices) for key, prices in PRICES.items()
+               if model.startswith(key)]
+    if matches:
+        return max(matches, key=lambda kv: len(kv[0]))[1]
     return None
 
 
