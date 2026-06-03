@@ -1,43 +1,84 @@
 """
 Model pricing for cost tracking.
 
-Prices in USD per million tokens. Updated from Anthropic pricing page.
-Cache reads are 90% cheaper than base input; cache writes are 25% more.
+Prices in USD per million tokens. Updated 2026-06-03 from Anthropic pricing page.
+Cache pricing uses the 5-minute TTL tier (default for API).
 """
 
 PRICES = {
+    "claude-opus-4-8": {
+        "input": 5.00,
+        "output": 25.00,
+        "cache_write": 6.25,
+        "cache_read": 0.50,
+    },
+    "claude-opus-4-7": {
+        "input": 5.00,
+        "output": 25.00,
+        "cache_write": 6.25,
+        "cache_read": 0.50,
+    },
     "claude-opus-4-6": {
-        "input": 15.00,
-        "output": 75.00,
+        "input": 5.00,
+        "output": 25.00,
+        "cache_write": 6.25,
+        "cache_read": 0.50,
     },
     "claude-opus-4-5": {
-        "input": 15.00,
+        "input": 5.00,
+        "output": 25.00,
+        "cache_write": 6.25,
+        "cache_read": 0.50,
+    },
+    "claude-opus-4-1": {
+        "input": 18.75,
         "output": 75.00,
-    },
-    "claude-sonnet-4-6": {
-        "input": 3.00,
-        "output": 15.00,
-    },
-    "claude-sonnet-4-5": {
-        "input": 3.00,
-        "output": 15.00,
-    },
-    "claude-sonnet-4-0": {
-        "input": 3.00,
-        "output": 15.00,
+        "cache_write": 18.75,
+        "cache_read": 1.50,
     },
     "claude-3-opus-20240229": {
         "input": 15.00,
         "output": 75.00,
+        "cache_write": 18.75,
+        "cache_read": 1.50,
+    },
+    "claude-sonnet-4-6": {
+        "input": 3.00,
+        "output": 15.00,
+        "cache_write": 3.75,
+        "cache_read": 0.30,
+    },
+    "claude-sonnet-4-5": {
+        "input": 3.00,
+        "output": 15.00,
+        "cache_write": 3.75,
+        "cache_read": 0.30,
+    },
+    "claude-sonnet-4-0": {
+        "input": 3.00,
+        "output": 15.00,
+        "cache_write": 3.75,
+        "cache_read": 0.30,
     },
     "claude-3-5-sonnet-20241022": {
         "input": 3.00,
         "output": 15.00,
+        "cache_write": 3.75,
+        "cache_read": 0.30,
+    },
+    "claude-haiku-4-5": {
+        "input": 0.80,
+        "output": 4.00,
+        "cache_write": 1.00,
+        "cache_read": 0.08,
+    },
+    "claude-3-5-haiku-20241022": {
+        "input": 0.80,
+        "output": 4.00,
+        "cache_write": 1.00,
+        "cache_read": 0.08,
     },
 }
-
-CACHE_READ_DISCOUNT = 0.10   # cache reads cost 10% of base input
-CACHE_WRITE_PREMIUM = 1.25   # cache writes cost 125% of base input
 
 
 def _resolve_model(model: str) -> dict:
@@ -54,20 +95,20 @@ def cost_of(usage: dict, model: str) -> float | None:
     if not prices:
         return None
 
-    input_cost = usage.get("input_tokens", 0) * prices["input"] / 1_000_000
-    output_cost = usage.get("output_tokens", 0) * prices["output"] / 1_000_000
-
+    input_tokens = usage.get("input_tokens", 0)
+    output_tokens = usage.get("output_tokens", 0)
     cache_read = usage.get("cache_read", 0)
     cache_write = usage.get("cache_write", 0)
 
-    if cache_read:
-        input_cost -= cache_read * prices["input"] / 1_000_000
-        input_cost += cache_read * prices["input"] * CACHE_READ_DISCOUNT / 1_000_000
-    if cache_write:
-        input_cost -= cache_write * prices["input"] / 1_000_000
-        input_cost += cache_write * prices["input"] * CACHE_WRITE_PREMIUM / 1_000_000
+    # Non-cached input tokens = total input minus cache hits and cache writes
+    plain_input = max(0, input_tokens - cache_read - cache_write)
 
-    return input_cost + output_cost
+    cost = (plain_input * prices["input"] / 1_000_000
+            + cache_read * prices["cache_read"] / 1_000_000
+            + cache_write * prices["cache_write"] / 1_000_000
+            + output_tokens * prices["output"] / 1_000_000)
+
+    return cost
 
 
 def format_cost(usd: float) -> str:
