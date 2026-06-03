@@ -5,3 +5,4 @@ archives/
 venv/
 .venv/
 sessions/
+ledger/

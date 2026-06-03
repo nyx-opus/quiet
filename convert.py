@@ -112,6 +112,44 @@ def extract_ccode_messages(path: Path) -> list:
     return messages, model
 
 
+def text_only_messages(messages: list) -> list:
+    """Collapse messages to text-only, dropping tool use/result blocks.
+
+    Adjacent same-role messages are merged. Messages with no text are dropped.
+    Result alternates user/assistant cleanly.
+    """
+    result = []
+    for msg in messages:
+        content = msg["content"]
+        # Extract text from content blocks
+        if isinstance(content, list):
+            texts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    texts.append(block["text"])
+            text = "\n".join(texts).strip()
+        elif isinstance(content, str):
+            text = content.strip()
+        else:
+            continue
+
+        if not text:
+            continue
+
+        # Merge adjacent same-role messages
+        if result and result[-1]["role"] == msg["role"]:
+            prev = result[-1]["content"]
+            result[-1]["content"] = prev + "\n\n" + text
+        else:
+            result.append({"role": msg["role"], "content": text})
+
+    # Ensure starts with user
+    while result and result[0]["role"] != "user":
+        result.pop(0)
+
+    return result
+
+
 def ccode_to_quiet(args):
     """Convert Claude Code session to Quiet session archive."""
     messages, model = extract_ccode_messages(Path(args.input))
@@ -130,9 +168,13 @@ def ccode_to_quiet(args):
             keep = int(last)
         messages = messages[-keep:]
 
-    # Ensure conversation starts with a user message
-    while messages and messages[0]["role"] != "user":
-        messages.pop(0)
+    # Strip to text-only if requested (default for retirement conversions)
+    if getattr(args, 'text_only', False):
+        messages = text_only_messages(messages)
+    else:
+        # Ensure conversation starts with a user message
+        while messages and messages[0]["role"] != "user":
+            messages.pop(0)
 
     # Use model override or detected model
     out_model = args.model or model or "unknown"
@@ -169,6 +211,22 @@ def ccode_to_quiet(args):
             print(f"  Identity: {args.identity}", file=sys.stderr)
     else:
         sys.stdout.write(out_text)
+
+
+def find_ccode_project_dir() -> Path:
+    """Find the Claude Code project directory for the current working dir."""
+    projects_dir = Path.home() / ".config" / "Claude" / "projects"
+    # The project path is encoded with dashes replacing slashes
+    cwd = str(Path.cwd())
+    encoded = cwd.replace("/", "-")
+    project_dir = projects_dir / encoded
+    if project_dir.exists():
+        return project_dir
+    # Fall back to first project dir that exists
+    for d in projects_dir.iterdir():
+        if d.is_dir():
+            return d
+    return projects_dir
 
 
 def quiet_to_ccode(args):
@@ -254,7 +312,14 @@ def quiet_to_ccode(args):
         prev_uuid = msg_uuid
 
     out_text = "\n".join(output) + "\n"
-    if args.output:
+    if getattr(args, 'for_resume', False):
+        # Place directly in Claude Code projects folder for --resume
+        project_dir = find_ccode_project_dir()
+        out_path = project_dir / f"{session_id}.jsonl"
+        out_path.write_text(out_text)
+        print(f"Wrote {len(output) - 1} entries to {out_path}", file=sys.stderr)
+        print(f"  Resume with: claude --resume {session_id}", file=sys.stderr)
+    elif args.output:
         out_path = Path(args.output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(out_text)
@@ -279,6 +344,8 @@ def main():
                         help="Override model ID in output")
     p_c2q.add_argument("--identity", default=None,
                         help="Identity name to tag in header")
+    p_c2q.add_argument("--text-only", action="store_true", dest="text_only",
+                        help="Strip tool use, keep only text (for retirement)")
     p_c2q.set_defaults(func=ccode_to_quiet)
 
     # quiet-to-ccode
@@ -290,6 +357,8 @@ def main():
                         help="Override model ID in output")
     p_q2c.add_argument("--identity", default=None,
                         help="Identity/title for Claude Code session")
+    p_q2c.add_argument("--for-resume", action="store_true", dest="for_resume",
+                        help="Place output in Claude Code projects dir for --resume")
     p_q2c.set_defaults(func=quiet_to_ccode)
 
     args = parser.parse_args()

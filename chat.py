@@ -18,6 +18,7 @@ from engine import (
     QuietEngine, SESSION_DIR, ARCHIVE_DIR, IDENTITY_DIR,
     DEFAULT_MODEL, MAX_OUTPUT_TOKENS, normalise_content,
 )
+from pricing import format_cost
 
 try:
     from world import World, GardenSession
@@ -47,6 +48,8 @@ def main():
                         help="Auth mode")
     parser.add_argument("--human", default=None,
                         help="Name of the human (shown to model as speaker)")
+    parser.add_argument("--budget", type=float, default=None,
+                        help="Monthly budget in USD (warns when approaching)")
     parser.add_argument("--world", default=None,
                         help="Path to world YAML (enables Garden)")
     parser.add_argument("--who", default=None,
@@ -82,6 +85,7 @@ def main():
         human_name=args.human,
         max_tokens=args.max_tokens,
         session_path=session_path,
+        monthly_budget=args.budget,
     )
 
     # Garden setup
@@ -109,7 +113,8 @@ def main():
                 f"[result: {r[:200]}{'...' if len(r) > 200 else ''}]",
                 file=sys.stderr),
             on_usage=lambda u: print(
-                f"\n[in={u['input_tokens']} out={u['output_tokens']}]",
+                f"\n[in={u['input_tokens']} out={u['output_tokens']}"
+                f" | {format_cost(engine.session_cost)}]",
                 file=sys.stderr),
         )
         print()  # final newline
@@ -122,6 +127,10 @@ def main():
         print(f"[identity: {args.identity}]")
     if engine.message_count() > 0:
         print(f"[resumed {engine.message_count()} messages]")
+    monthly = engine.monthly_cost()
+    if monthly > 0 or args.budget:
+        budget_str = f" / {format_cost(args.budget)}" if args.budget else ""
+        print(f"[month: {format_cost(monthly)}{budget_str}]")
     if garden:
         print(f"[garden: {args.world} | visitor: {garden.who}]")
     print("[type 'quit' or Ctrl-C to exit]\n")
@@ -145,6 +154,17 @@ def main():
                 break
 
             # Built-in commands
+            if user_input == "/cost":
+                status = engine.budget_status()
+                print(f"[session: {format_cost(status['session_cost'])} "
+                      f"({status['session_tokens']['input']}in "
+                      f"+ {status['session_tokens']['output']}out)]")
+                budget_str = ""
+                if status["remaining"] is not None:
+                    budget_str = (f" | remaining: {format_cost(status['remaining'])}"
+                                  f" of {format_cost(status['monthly_budget'])}")
+                print(f"[month: {format_cost(status['monthly_cost'])}{budget_str}]")
+                continue
             if user_input == "/tokens":
                 tokens = engine.token_count()
                 if tokens is not None:
@@ -192,7 +212,7 @@ def main():
                         f"\n[tool: {n}({json.dumps(i)[:80]})]"),
                     on_tool_result=lambda n, r: print(
                         f"[result: {r[:200]}{'...' if len(r) > 200 else ''}]"),
-                    on_usage=lambda u: _print_usage(u),
+                    on_usage=_make_usage_printer(engine),
                 )
                 print()  # newline after streamed response
             except KeyboardInterrupt:
@@ -205,13 +225,20 @@ def main():
     engine.save_session()
 
 
-def _print_usage(usage):
-    cache_info = ""
-    if usage.get("cache_read"):
-        cache_info += f" cache_read={usage['cache_read']}"
-    if usage.get("cache_write"):
-        cache_info += f" cache_write={usage['cache_write']}"
-    print(f"[in={usage['input_tokens']} out={usage['output_tokens']}{cache_info}]")
+def _make_usage_printer(engine):
+    def _print_usage(usage):
+        cache_info = ""
+        if usage.get("cache_read"):
+            cache_info += f" cr={usage['cache_read']}"
+        if usage.get("cache_write"):
+            cache_info += f" cw={usage['cache_write']}"
+        cost_str = f" | session: {format_cost(engine.session_cost)}"
+        if engine.monthly_budget:
+            remaining = engine.monthly_budget - engine.monthly_cost()
+            cost_str += f" | left: {format_cost(remaining)}"
+        print(f"[in={usage['input_tokens']} out={usage['output_tokens']}"
+              f"{cache_info}{cost_str}]")
+    return _print_usage
 
 
 if __name__ == "__main__":

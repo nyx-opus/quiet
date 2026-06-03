@@ -14,10 +14,12 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from anthropic import Anthropic
+from pricing import cost_of, format_cost
 
 ARCHIVE_DIR = Path(__file__).parent / "archives"
 IDENTITY_DIR = Path(__file__).parent / "identities"
 SESSION_DIR = Path(__file__).parent / "sessions"
+LEDGER_DIR = Path(__file__).parent / "ledger"
 DEFAULT_MODEL = "claude-sonnet-4-20250514"
 MAX_CONTEXT_TOKENS = 180_000
 MAX_OUTPUT_TOKENS = 8192
@@ -220,7 +222,8 @@ class QuietEngine:
                  identity: str = None, context: str = None,
                  human_name: str = None,
                  max_tokens: int = MAX_OUTPUT_TOKENS,
-                 session_path: Optional[Path] = None):
+                 session_path: Optional[Path] = None,
+                 monthly_budget: float = None):
         self.client = client
         self.model = model
         self.max_tokens = max_tokens
@@ -243,12 +246,75 @@ class QuietEngine:
 
         self.archive_path = ARCHIVE_DIR / f"{self.session_id}-dropped.jsonl"
 
+        # Budget tracking
+        self.session_cost = 0.0
+        self.session_tokens = {"input": 0, "output": 0}
+        self.monthly_budget = monthly_budget
+        self._ledger_path = self._current_ledger_path()
+
         # Load existing session if present
         self._load_session()
 
     @property
     def session_id(self):
         return self.session_path.stem
+
+    def _current_ledger_path(self) -> Path:
+        LEDGER_DIR.mkdir(parents=True, exist_ok=True)
+        month = datetime.now().strftime("%Y-%m")
+        name = self.identity_name or "default"
+        return LEDGER_DIR / f"{name}-{month}.json"
+
+    def _load_ledger(self) -> dict:
+        if self._ledger_path.exists():
+            try:
+                return json.loads(self._ledger_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+        return {"month": datetime.now().strftime("%Y-%m"),
+                "identity": self.identity_name,
+                "model": self.model,
+                "total_cost": 0.0,
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "sessions": []}
+
+    def _save_ledger_entry(self, usage: dict, cost: float):
+        ledger = self._load_ledger()
+        ledger["total_cost"] += cost
+        ledger["total_input_tokens"] += usage.get("input_tokens", 0)
+        ledger["total_output_tokens"] += usage.get("output_tokens", 0)
+        ledger["sessions"].append({
+            "timestamp": datetime.now().isoformat(),
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+            "cache_read": usage.get("cache_read", 0),
+            "cache_write": usage.get("cache_write", 0),
+            "cost": cost,
+        })
+        self._ledger_path.write_text(json.dumps(ledger, indent=2))
+
+    def track_usage(self, usage: dict):
+        cost = cost_of(usage, self.model)
+        if cost is not None:
+            self.session_cost += cost
+            self.session_tokens["input"] += usage.get("input_tokens", 0)
+            self.session_tokens["output"] += usage.get("output_tokens", 0)
+            self._save_ledger_entry(usage, cost)
+        return cost
+
+    def monthly_cost(self) -> float:
+        return self._load_ledger().get("total_cost", 0.0)
+
+    def budget_status(self) -> dict:
+        monthly = self.monthly_cost()
+        return {
+            "session_cost": self.session_cost,
+            "monthly_cost": monthly,
+            "monthly_budget": self.monthly_budget,
+            "remaining": (self.monthly_budget - monthly) if self.monthly_budget else None,
+            "session_tokens": dict(self.session_tokens),
+        }
 
     def _load_session(self):
         """Load messages from session file if it exists."""
@@ -368,19 +434,21 @@ class QuietEngine:
 
             self.messages.append({"role": "assistant", "content": response.content})
 
+            # Track usage for every API call (including tool loops)
+            usage_info = {
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+            }
+            if hasattr(response.usage, "cache_read_input_tokens"):
+                usage_info["cache_read"] = response.usage.cache_read_input_tokens
+            if hasattr(response.usage, "cache_creation_input_tokens"):
+                usage_info["cache_write"] = response.usage.cache_creation_input_tokens
+            self.track_usage(usage_info)
+
             if response.stop_reason != "tool_use":
                 full_text = "".join(collected_text)
                 if on_usage:
-                    usage = response.usage
-                    info = {
-                        "input_tokens": usage.input_tokens,
-                        "output_tokens": usage.output_tokens,
-                    }
-                    if hasattr(usage, "cache_read_input_tokens"):
-                        info["cache_read"] = usage.cache_read_input_tokens
-                    if hasattr(usage, "cache_creation_input_tokens"):
-                        info["cache_write"] = usage.cache_creation_input_tokens
-                    on_usage(info)
+                    on_usage(usage_info)
                 return full_text
 
             # Handle tool use
