@@ -116,6 +116,7 @@ def execute_tool(name: str, input_data: dict) -> str:
                 text=True,
                 timeout=120,
                 cwd=os.path.expanduser("~"),
+                stdin=subprocess.DEVNULL,
             )
             output = result.stdout
             if result.stderr:
