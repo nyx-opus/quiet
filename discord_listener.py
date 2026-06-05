@@ -68,6 +68,12 @@ class QuietDiscordBot(discord.Client):
                         Path(__file__).parent / "transcripts"))
         self.transcript_dir.mkdir(parents=True, exist_ok=True)
 
+        # Attachment inbox
+        self.inbox_dir = Path(
+            config.get("inbox_dir",
+                        Path(__file__).parent / "inbox"))
+        self.inbox_dir.mkdir(parents=True, exist_ok=True)
+
     async def on_ready(self):
         # Resolve channel names from Discord
         for guild in self.guilds:
@@ -102,8 +108,21 @@ class QuietDiscordBot(discord.Client):
 
         sender = message.author.display_name
         content = message.content
-        if not content and message.attachments:
-            content = f"[sent {len(message.attachments)} attachment(s)]"
+
+        # Download attachments
+        attachment_paths = []
+        for att in message.attachments:
+            try:
+                ext = Path(att.filename).suffix or ".bin"
+                local = self.inbox_dir / f"{message.id}-{att.id}{ext}"
+                await att.save(local)
+                attachment_paths.append(str(local))
+            except Exception as e:
+                print(f"  → attachment download error: {e}", file=sys.stderr)
+
+        if attachment_paths:
+            att_text = " ".join(f"[attachment: {p}]" for p in attachment_paths)
+            content = f"{content}\n{att_text}" if content else att_text
         if not content:
             return
 
