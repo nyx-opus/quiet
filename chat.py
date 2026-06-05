@@ -13,7 +13,7 @@ import json
 import sys
 from pathlib import Path
 
-from auth import create_client
+from auth import create_client, CCODE_SYSTEM_PREAMBLE
 import config_reader
 from engine import (
     QuietEngine, SESSION_DIR, ARCHIVE_DIR, IDENTITY_DIR,
@@ -104,6 +104,9 @@ def main():
         # Legacy: copy archive to a session file
         session_path = Path(args.resume)
 
+    # Subscription auth: prepend ccode identity so API classifies correctly
+    system_prefix = CCODE_SYSTEM_PREAMBLE if auth_mode == "subscription" else None
+
     # Create engine
     engine = QuietEngine(
         client=client,
@@ -115,6 +118,7 @@ def main():
         session_path=session_path,
         monthly_budget=args.budget,
         coop_url=args.coop,
+        system_prefix=system_prefix,
     )
 
     # Garden setup

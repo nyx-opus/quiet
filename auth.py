@@ -44,6 +44,11 @@ def _get_ccode_version() -> str:
     return "2.1.0"  # fallback
 
 
+CCODE_SYSTEM_PREAMBLE = (
+    "You are Claude Code, Anthropic's official CLI for Claude."
+)
+
+
 def _subscription_headers() -> dict:
     """Headers that identify this as Claude Code interactive CLI traffic.
 
@@ -51,10 +56,14 @@ def _subscription_headers() -> dict:
     falling back to API-key pricing. Reverse-engineered from the
     Claude Code binary — see docs/subscription-auth-headers.md.
     """
+    version = _get_ccode_version()
     return {
-        "User-Agent": f"claude-code/{_get_ccode_version()}",
+        "User-Agent": f"claude-code/{version}",
         "x-app": "cli",
         "anthropic-client-platform": "claude_code_cli",
+        "x-anthropic-billing-header": (
+            f"cc_version={version}; cc_entrypoint=cli; cch=00000;"
+        ),
     }
 
 

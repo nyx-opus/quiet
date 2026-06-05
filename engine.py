@@ -37,8 +37,11 @@ def load_identity(name: str) -> str:
     return ""
 
 
-def build_system_prompt(identity_text: str, human_name: str = None) -> list:
+def build_system_prompt(identity_text: str, human_name: str = None,
+                        system_prefix: str = None) -> list:
     blocks = []
+    if system_prefix:
+        blocks.append({"type": "text", "text": system_prefix})
     if identity_text:
         blocks.append({"type": "text", "text": identity_text,
                         "cache_control": {"type": "ephemeral"}})
@@ -242,7 +245,8 @@ class QuietEngine:
                  max_tokens: int = MAX_OUTPUT_TOKENS,
                  session_path: Optional[Path] = None,
                  monthly_budget: float = None,
-                 coop_url: str = None):
+                 coop_url: str = None,
+                 system_prefix: str = None):
         self.client = client
         self.model = model
         self.max_tokens = max_tokens
@@ -253,7 +257,8 @@ class QuietEngine:
 
         identity_text = load_identity(identity) if identity else ""
         self.system = build_system_prompt(
-            identity_text, human_name=human_name)
+            identity_text, human_name=human_name,
+            system_prefix=system_prefix)
         self._initial_context = context or ""
 
         # Session persistence
