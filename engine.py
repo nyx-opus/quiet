@@ -6,7 +6,9 @@ context trimming, and session persistence. Interface-agnostic — can be
 driven by CLI interactive mode, one-shot --prompt mode, or a web server.
 """
 
+import base64
 import json
+import mimetypes
 import os
 import subprocess
 from datetime import datetime
@@ -15,6 +17,8 @@ from typing import Callable, Optional
 
 from anthropic import Anthropic
 from pricing import cost_of, format_cost
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 
 ARCHIVE_DIR = Path(__file__).parent / "archives"
 IDENTITY_DIR = Path(__file__).parent / "identities"
@@ -131,7 +135,20 @@ def execute_tool(name: str, input_data: dict) -> str:
 
     elif name == "read_file":
         try:
-            return Path(input_data["path"]).read_text()
+            p = Path(input_data["path"])
+            suffix = p.suffix.lower()
+            if suffix in IMAGE_EXTENSIONS:
+                data = base64.standard_b64encode(p.read_bytes()).decode()
+                media_type = mimetypes.guess_type(str(p))[0] or "image/png"
+                return [
+                    {"type": "image", "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": data,
+                    }},
+                    {"type": "text", "text": f"[image: {p.name}]"},
+                ]
+            return p.read_text()
         except Exception as e:
             return f"[error: {e}]"
 
@@ -196,7 +213,13 @@ def serialise_message(msg):
         blocks = []
         for block in content:
             if isinstance(block, dict):
-                blocks.append(block)
+                # Don't persist base64 image data in session files
+                if (block.get("type") == "image"
+                        and block.get("source", {}).get("type") == "base64"):
+                    blocks.append({"type": "text",
+                                   "text": "[image data omitted from session]"})
+                else:
+                    blocks.append(block)
             elif hasattr(block, 'text'):
                 blocks.append({"type": "text", "text": block.text})
             elif hasattr(block, 'type') and block.type == 'tool_use':
@@ -460,7 +483,8 @@ class QuietEngine:
                         on_tool(block.name, block.input)
                     result = execute_tool(block.name, block.input)
                     if on_tool_result:
-                        on_tool_result(block.name, result)
+                        preview = result if isinstance(result, str) else "[image]"
+                        on_tool_result(block.name, preview)
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
