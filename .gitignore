@@ -6,3 +6,6 @@ venv/
 .venv/
 sessions/
 ledger/
+inbox/
+transcripts/
+contexts/my_environment.md

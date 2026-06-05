@@ -72,7 +72,7 @@ fi
 context_tmp=$(mktemp)
 for ctx_file in \
     "$QUIET_DIR/contexts/quiet_architecture.md" \
-    "$QUIET_DIR/contexts/${identity}.md" \
+    "$QUIET_DIR/contexts/my_environment.md" \
     "$HOME/claude-autonomy-platform/context/our_background.md"; do
     if [ -f "$ctx_file" ]; then
         cat "$ctx_file" >> "$context_tmp"
