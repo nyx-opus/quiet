@@ -68,20 +68,31 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
     fi
 fi
 
-# Context file (machine details, tools, paths)
+# Assemble context from shared architecture + per-Claude machine details + family background
+context_tmp=$(mktemp)
+for ctx_file in \
+    "$QUIET_DIR/contexts/quiet_architecture.md" \
+    "$QUIET_DIR/contexts/${identity}.md" \
+    "$HOME/claude-autonomy-platform/context/our_background.md"; do
+    if [ -f "$ctx_file" ]; then
+        cat "$ctx_file" >> "$context_tmp"
+        echo "" >> "$context_tmp"
+        echo "Loaded context: $(basename "$ctx_file")"
+    fi
+done
+
 context_args=""
-context_file="$QUIET_DIR/contexts/${identity}.md"
-if [ -f "$context_file" ]; then
-    context_args="--context $context_file"
-    echo "Context: $context_file"
+if [ -s "$context_tmp" ]; then
+    context_args="--context $context_tmp"
 fi
 
 echo ""
 echo "Launching Quiet..."
 echo "---"
-exec python3 "$QUIET_DIR/chat.py" \
+python3 "$QUIET_DIR/chat.py" \
     --identity "$identity" \
     --model "$model" \
     --human "$human" \
     --auth api_key \
     $context_args
+rm -f "$context_tmp"

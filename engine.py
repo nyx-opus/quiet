@@ -37,25 +37,19 @@ def load_identity(name: str) -> str:
     return ""
 
 
-def build_system_prompt(identity_text: str, project_context: str = "",
-                        human_name: str = None) -> list:
+def build_system_prompt(identity_text: str, human_name: str = None) -> list:
     blocks = []
     if identity_text:
-        blocks.append({"type": "text", "text": identity_text})
+        blocks.append({"type": "text", "text": identity_text,
+                        "cache_control": {"type": "ephemeral"}})
     if human_name:
         blocks.append({
             "type": "text",
             "text": f"The human you are talking to is {human_name}. "
                     f"Messages from the user role are from {human_name}.",
         })
-    if project_context:
-        blocks.append({
-            "type": "text",
-            "text": project_context,
-            "cache_control": {"type": "ephemeral"},
-        })
     if not blocks:
-        blocks.append({"type": "text", "text": "You are a helpful assistant."})
+        blocks.append({"type": "text", "text": "You are running in Quiet."})
     return blocks
 
 
@@ -258,7 +252,8 @@ class QuietEngine:
 
         identity_text = load_identity(identity) if identity else ""
         self.system = build_system_prompt(
-            identity_text, context or "", human_name=human_name)
+            identity_text, human_name=human_name)
+        self._initial_context = context or ""
 
         # Session persistence
         SESSION_DIR.mkdir(parents=True, exist_ok=True)
@@ -345,6 +340,7 @@ class QuietEngine:
         if self.session_path.exists():
             lines = self.session_path.read_text().strip().split("\n")
             if not lines:
+                self._inject_context()
                 return
             # First line is header
             try:
@@ -363,6 +359,24 @@ class QuietEngine:
                         self.messages.append(msg)
                 except json.JSONDecodeError:
                     continue
+            if not self.messages:
+                self._inject_context()
+        else:
+            self._inject_context()
+
+    def _inject_context(self):
+        """Inject context as early conversation turns for a fresh session."""
+        if not self._initial_context:
+            return
+        self.messages.append({
+            "role": "user",
+            "content": [{"type": "text",
+                         "text": f"[Session context]\n\n{self._initial_context}"}],
+        })
+        self.messages.append({
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Understood."}],
+        })
 
     def save_session(self):
         """Persist current conversation to session file."""
