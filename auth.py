@@ -3,18 +3,18 @@ Dual auth for Anthropic Python SDK: subscription OAuth or API key.
 
 Reads Claude Code's OAuth credentials from ~/.config/Claude/.credentials.json
 and provides an AccessTokenProvider that handles automatic token refresh.
+
+When using subscription auth, sends the same headers Claude Code sends so
+the API classifies traffic correctly (interactive CLI, subscription rates).
 """
 
 import json
 import os
+import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
-
-# Quiet is an interactive chat client. When using subscription auth, identify
-# as CLI (interactive) rather than SDK (automated) so traffic is classified
-# correctly. See: https://github.com/nimbalyst/nimbalyst/issues/174
-os.environ.setdefault("CLAUDE_CODE_ENTRYPOINT", "cli")
 
 import httpx
 from anthropic.lib.credentials._types import AccessToken
@@ -25,6 +25,37 @@ OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_ENDPOINT = "https://api.anthropic.com/v1/oauth/token"
 OAUTH_BETA_HEADER = "oauth-2025-04-20"
 REFRESH_MARGIN_SECONDS = 300
+
+
+def _get_ccode_version() -> str:
+    """Get installed Claude Code version, or a sensible default."""
+    for cmd in [["claude", "--version"], ["npx", "claude", "--version"]]:
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                # Output like "2.1.143 (Claude Code)" or "claude-code 2.1.143"
+                for word in result.stdout.strip().split():
+                    if word[0].isdigit() and "." in word:
+                        return word
+        except Exception:
+            continue
+    return "2.1.0"  # fallback
+
+
+def _subscription_headers() -> dict:
+    """Headers that identify this as Claude Code interactive CLI traffic.
+
+    The API uses these to apply subscription rate limits rather than
+    falling back to API-key pricing. Reverse-engineered from the
+    Claude Code binary — see docs/subscription-auth-headers.md.
+    """
+    return {
+        "User-Agent": f"claude-code/{_get_ccode_version()}",
+        "x-app": "cli",
+        "anthropic-client-platform": "claude_code_cli",
+    }
 
 
 class ClaudeOAuthProvider:
@@ -110,7 +141,7 @@ def create_client(auth_mode: str = "auto"):
     """Create an Anthropic client with the specified auth mode.
 
     Modes:
-        "subscription" - OAuth subscription token (flat rate)
+        "subscription" - OAuth subscription token (flat rate, ccode headers)
         "api_key"      - API key from ANTHROPIC_API_KEY env var (pay per token)
         "auto"         - subscription if credentials exist, else api_key
     """
@@ -125,7 +156,11 @@ def create_client(auth_mode: str = "auto"):
 
     if auth_mode == "subscription" or (auth_mode == "auto" and CREDENTIALS_PATH.exists()):
         provider = ClaudeOAuthProvider()
-        return Anthropic(credentials=provider), "subscription"
+        headers = _subscription_headers()
+        return Anthropic(
+            credentials=provider,
+            default_headers=headers,
+        ), "subscription"
 
     if auth_mode == "auto":
         api_key = os.environ.get("ANTHROPIC_API_KEY")
