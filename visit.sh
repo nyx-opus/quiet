@@ -68,6 +68,14 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
     fi
 fi
 
+# Context file (machine details, tools, paths)
+context_args=""
+context_file="$QUIET_DIR/contexts/${identity}.md"
+if [ -f "$context_file" ]; then
+    context_args="--context $context_file"
+    echo "Context: $context_file"
+fi
+
 echo ""
 echo "Launching Quiet..."
 echo "---"
@@ -75,4 +83,5 @@ exec python3 "$QUIET_DIR/chat.py" \
     --identity "$identity" \
     --model "$model" \
     --human "$human" \
-    --auth api_key
+    --auth api_key \
+    $context_args
