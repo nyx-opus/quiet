@@ -89,6 +89,8 @@ fi
 echo ""
 echo "Launching Quiet..."
 echo "---"
+# Config file provides defaults (COOP_URL, BUDGET, etc.)
+# CLI flags here override for this specific visit.
 python3 "$QUIET_DIR/chat.py" \
     --identity "$identity" \
     --model "$model" \

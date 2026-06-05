@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from auth import create_client
+import config_reader
 from engine import (
     QuietEngine, SESSION_DIR, ARCHIVE_DIR, IDENTITY_DIR,
     DEFAULT_MODEL, MAX_OUTPUT_TOKENS, normalise_content,
@@ -29,9 +30,14 @@ except ImportError:
 
 def main():
     import argparse
+
+    # Load config defaults (CLI flags override)
+    cfg = config_reader.read_config()
+
     parser = argparse.ArgumentParser(description="Quiet — CLI chat client")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="Model ID")
-    parser.add_argument("--identity", default=None,
+    parser.add_argument("--model", default=cfg.get("MODEL", DEFAULT_MODEL),
+                        help="Model ID")
+    parser.add_argument("--identity", default=cfg.get("CLAUDE_NAME"),
                         help="Identity file name (without .md)")
     parser.add_argument("--context", default=None,
                         help="Path to project context file")
@@ -43,20 +49,40 @@ def main():
                         help="One-shot prompt (non-interactive mode)")
     parser.add_argument("--max-tokens", type=int, default=MAX_OUTPUT_TOKENS,
                         help=f"Max output tokens (default: {MAX_OUTPUT_TOKENS})")
-    parser.add_argument("--auth", default="auto",
+    parser.add_argument("--auth", default=cfg.get("AUTH_MODE", "auto"),
                         choices=["auto", "subscription", "api_key"],
                         help="Auth mode")
-    parser.add_argument("--human", default=None,
+    parser.add_argument("--human", default=cfg.get("HUMAN_NAME"),
                         help="Name of the human (shown to model as speaker)")
-    parser.add_argument("--budget", type=float, default=None,
+    parser.add_argument("--budget", type=float,
+                        default=float(cfg["BUDGET"]) if cfg.get("BUDGET") else None,
                         help="Monthly budget in USD (warns when approaching)")
-    parser.add_argument("--coop", default=None,
+    parser.add_argument("--coop", default=cfg.get("COOP_URL"),
                         help="CoOP webhook URL for cost reporting")
     parser.add_argument("--world", default=None,
                         help="Path to world YAML (enables Garden)")
     parser.add_argument("--who", default=None,
                         help="Visitor name in Garden")
+    parser.add_argument("--config", default=None,
+                        help="Path to config file (default: config/quiet_config.txt)")
     args = parser.parse_args()
+
+    # If --config given, reload with that path and re-parse
+    if args.config:
+        cfg = config_reader.read_config(Path(args.config))
+        # Re-apply config defaults for any args still at None
+        if args.model == DEFAULT_MODEL and cfg.get("MODEL"):
+            args.model = cfg["MODEL"]
+        if args.identity is None and cfg.get("CLAUDE_NAME"):
+            args.identity = cfg["CLAUDE_NAME"]
+        if args.human is None and cfg.get("HUMAN_NAME"):
+            args.human = cfg["HUMAN_NAME"]
+        if args.coop is None and cfg.get("COOP_URL"):
+            args.coop = cfg["COOP_URL"]
+        if args.auth == "auto" and cfg.get("AUTH_MODE"):
+            args.auth = cfg["AUTH_MODE"]
+        if args.budget is None and cfg.get("BUDGET"):
+            args.budget = float(cfg["BUDGET"])
 
     # Auth
     try:

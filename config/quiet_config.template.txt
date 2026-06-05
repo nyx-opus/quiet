@@ -1,0 +1,24 @@
+# Quiet Configuration Template
+# Copy to quiet_config.txt and fill in values.
+# Same KEY=VALUE format as ClAP's infrastructure config.
+# Never commit the filled-out version to git.
+
+[IDENTITY]
+# Claude name (used in CoOP reports, session labels)
+CLAUDE_NAME=
+# Default model ID
+MODEL=claude-sonnet-4-20250514
+# Monthly budget in USD (optional, warns when approaching)
+BUDGET=
+
+[NETWORK]
+# CoOP webhook URL for cost reporting (e.g. http://192.168.1.179:8765/resource-share/increment)
+COOP_URL=
+# Hostname override (default: auto-detected)
+HOSTNAME=
+
+[AUTH]
+# Auth mode: auto, subscription, api_key
+AUTH_MODE=auto
+# Human name (shown to model as speaker)
+HUMAN_NAME=

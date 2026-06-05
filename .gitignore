@@ -9,3 +9,4 @@ ledger/
 inbox/
 transcripts/
 contexts/my_environment.md
+config/quiet_config.txt
