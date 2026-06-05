@@ -241,7 +241,8 @@ class QuietEngine:
                  human_name: str = None,
                  max_tokens: int = MAX_OUTPUT_TOKENS,
                  session_path: Optional[Path] = None,
-                 monthly_budget: float = None):
+                 monthly_budget: float = None,
+                 coop_url: str = None):
         self.client = client
         self.model = model
         self.max_tokens = max_tokens
@@ -269,6 +270,7 @@ class QuietEngine:
         self.session_cost = 0.0
         self.session_tokens = {"input": 0, "output": 0}
         self.monthly_budget = monthly_budget
+        self.coop_url = coop_url
         self._ledger_path = self._current_ledger_path()
 
         # Load existing session if present
@@ -320,7 +322,30 @@ class QuietEngine:
             self.session_tokens["input"] += usage.get("input_tokens", 0)
             self.session_tokens["output"] += usage.get("output_tokens", 0)
             self._save_ledger_entry(usage, cost)
+            self._report_to_coop(cost)
         return cost
+
+    def _report_to_coop(self, cost_delta: float):
+        if not self.coop_url:
+            return
+        try:
+            import socket
+            import urllib.request
+            payload = json.dumps({
+                "claude_name": self.identity_name or "quiet",
+                "cost_delta": cost_delta,
+                "mode": "quiet",
+                "current_interval": 0,
+                "hostname": socket.gethostname(),
+                "ip_address": socket.gethostbyname(socket.gethostname()),
+            }).encode()
+            req = urllib.request.Request(
+                self.coop_url, data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST")
+            urllib.request.urlopen(req, timeout=5)
+        except Exception:
+            pass
 
     def monthly_cost(self) -> float:
         return self._load_ledger().get("total_cost", 0.0)

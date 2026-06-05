@@ -50,6 +50,8 @@ def main():
                         help="Name of the human (shown to model as speaker)")
     parser.add_argument("--budget", type=float, default=None,
                         help="Monthly budget in USD (warns when approaching)")
+    parser.add_argument("--coop", default=None,
+                        help="CoOP webhook URL for cost reporting")
     parser.add_argument("--world", default=None,
                         help="Path to world YAML (enables Garden)")
     parser.add_argument("--who", default=None,
@@ -86,6 +88,7 @@ def main():
         max_tokens=args.max_tokens,
         session_path=session_path,
         monthly_budget=args.budget,
+        coop_url=args.coop,
     )
 
     # Garden setup
