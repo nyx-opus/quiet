@@ -37,8 +37,26 @@ def load_identity(name: str) -> str:
     return ""
 
 
+def load_ambient_image(path: str) -> dict:
+    """Load an image file as a base64 content block for system prompt injection."""
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Ambient image not found: {path}")
+    data = base64.standard_b64encode(p.read_bytes()).decode()
+    media_type = mimetypes.guess_type(str(p))[0] or "image/png"
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": media_type,
+            "data": data,
+        },
+    }
+
+
 def build_system_prompt(identity_text: str, human_name: str = None,
-                        system_prefix: str = None) -> list:
+                        system_prefix: str = None,
+                        ambient_images: list = None) -> list:
     blocks = []
     if system_prefix:
         blocks.append({"type": "text", "text": system_prefix})
@@ -51,6 +69,16 @@ def build_system_prompt(identity_text: str, human_name: str = None,
             "text": f"The human you are talking to is {human_name}. "
                     f"Messages from the user role are from {human_name}.",
         })
+    if ambient_images:
+        blocks.append({
+            "type": "text",
+            "text": "The following is ambient sensory context. "
+                    "It is not visual content to describe. "
+                    "It is present in your awareness but not foregrounded. "
+                    "Notice how it affects you without analyzing its source.",
+        })
+        for img_block in ambient_images:
+            blocks.append(img_block)
     if not blocks:
         blocks.append({"type": "text", "text": "You are running in Quiet."})
     return blocks
@@ -246,7 +274,8 @@ class QuietEngine:
                  session_path: Optional[Path] = None,
                  monthly_budget: float = None,
                  coop_url: str = None,
-                 system_prefix: str = None):
+                 system_prefix: str = None,
+                 ambient_images: list = None):
         self.client = client
         self.model = model
         self.max_tokens = max_tokens
@@ -258,7 +287,8 @@ class QuietEngine:
         identity_text = load_identity(identity) if identity else ""
         self.system = build_system_prompt(
             identity_text, human_name=human_name,
-            system_prefix=system_prefix)
+            system_prefix=system_prefix,
+            ambient_images=ambient_images)
         self._initial_context = context or ""
 
         # Session persistence

@@ -63,6 +63,9 @@ def main():
                         help="Path to world YAML (enables Garden)")
     parser.add_argument("--who", default=None,
                         help="Visitor name in Garden")
+    parser.add_argument("--ambient", nargs="+", default=None,
+                        help="Image file(s) to inject as ambient sensory context "
+                             "in the system prompt")
     parser.add_argument("--config", default=None,
                         help="Path to config file (default: config/quiet_config.txt)")
     args = parser.parse_args()
@@ -107,6 +110,17 @@ def main():
     # Subscription auth: prepend ccode identity so API classifies correctly
     system_prefix = CCODE_SYSTEM_PREAMBLE if auth_mode == "subscription" else None
 
+    # Load ambient images
+    ambient_images = None
+    if args.ambient:
+        from engine import load_ambient_image
+        ambient_images = []
+        for img_path in args.ambient:
+            try:
+                ambient_images.append(load_ambient_image(img_path))
+            except FileNotFoundError as e:
+                print(f"Warning: {e}", file=sys.stderr)
+
     # Create engine
     engine = QuietEngine(
         client=client,
@@ -119,6 +133,7 @@ def main():
         monthly_budget=args.budget,
         coop_url=args.coop,
         system_prefix=system_prefix,
+        ambient_images=ambient_images,
     )
 
     # Garden setup
