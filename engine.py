@@ -25,9 +25,34 @@ IDENTITY_DIR = Path(__file__).parent / "identities"
 SESSION_DIR = Path(__file__).parent / "sessions"
 LEDGER_DIR = Path(__file__).parent / "ledger"
 DEFAULT_MODEL = "claude-sonnet-4-20250514"
-MAX_CONTEXT_TOKENS = 180_000
 MAX_OUTPUT_TOKENS = 8192
 CACHE_MIN_TOKENS = 2048
+
+# Context trim thresholds per model window size.
+# Trim starts at 90% of the model's context window.
+MODEL_CONTEXT_WINDOWS = {
+    "claude-fable-5": 1_000_000,
+    "claude-mythos-5": 1_000_000,
+    "claude-opus-4-8": 1_000_000,
+    "claude-opus-4-7": 1_000_000,
+    "claude-opus-4-6": 1_000_000,
+    "claude-sonnet-4-6": 1_000_000,
+    "claude-sonnet-4-5": 200_000,
+    "claude-opus-4-5": 200_000,
+    "claude-opus-4-1": 200_000,
+    "claude-opus-4-0": 200_000,
+    "claude-sonnet-4-0": 200_000,
+    "claude-3-opus-20240229": 200_000,
+    "claude-3-5-sonnet-20241022": 200_000,
+}
+DEFAULT_CONTEXT_WINDOW = 200_000
+TRIM_RATIO = 0.9
+
+
+def context_trim_threshold(model: str) -> int:
+    """Return the token count at which rolling trim should start."""
+    window = MODEL_CONTEXT_WINDOWS.get(model, DEFAULT_CONTEXT_WINDOW)
+    return int(window * TRIM_RATIO)
 
 
 def load_identity(name: str) -> str:
@@ -70,15 +95,15 @@ def build_system_prompt(identity_text: str, human_name: str = None,
                     f"Messages from the user role are from {human_name}.",
         })
     if ambient_images:
+        # Note: images can't go in system prompt (API restriction).
+        # They're injected as early conversation turns instead.
+        # This block is kept as a text-only marker.
         blocks.append({
             "type": "text",
-            "text": "The following is ambient sensory context. "
+            "text": "Ambient sensory context is present in your awareness. "
                     "It is not visual content to describe. "
-                    "It is present in your awareness but not foregrounded. "
                     "Notice how it affects you without analyzing its source.",
         })
-        for img_block in ambient_images:
-            blocks.append(img_block)
     if not blocks:
         blocks.append({"type": "text", "text": "You are running in Quiet."})
     return blocks
@@ -290,6 +315,7 @@ class QuietEngine:
             system_prefix=system_prefix,
             ambient_images=ambient_images)
         self._initial_context = context or ""
+        self._ambient_images = ambient_images or []
 
         # Session persistence
         SESSION_DIR.mkdir(parents=True, exist_ok=True)
@@ -310,6 +336,11 @@ class QuietEngine:
 
         # Load existing session if present
         self._load_session()
+
+        # Inject ambient images as early conversation turns
+        # (API doesn't allow images in system prompt)
+        if self._ambient_images:
+            self._inject_ambient()
 
     @property
     def session_id(self):
@@ -424,6 +455,26 @@ class QuietEngine:
         else:
             self._inject_context()
 
+    def _inject_ambient(self):
+        """Inject ambient images as early conversation turns."""
+        content_blocks = [
+            {"type": "text",
+             "text": "[ambient sensory context]"},
+        ]
+        for img_block in self._ambient_images:
+            content_blocks.append(img_block)
+
+        # Insert at the start of conversation
+        self.messages.insert(0, {
+            "role": "user",
+            "content": content_blocks,
+        })
+        self.messages.insert(1, {
+            "role": "assistant",
+            "content": [{"type": "text",
+                         "text": "Present."}],
+        })
+
     def _inject_context(self):
         """Inject context as early conversation turns for a fresh session."""
         if not self._initial_context:
@@ -452,6 +503,7 @@ class QuietEngine:
 
     def trim_context(self):
         """Mechanically drop oldest turns when approaching context limit."""
+        threshold = context_trim_threshold(self.model)
         try:
             count = self.client.messages.count_tokens(
                 model=self.model, messages=self.messages,
@@ -461,11 +513,11 @@ class QuietEngine:
         except Exception:
             return
 
-        if current <= MAX_CONTEXT_TOKENS:
+        if current <= threshold:
             return
 
         dropped = []
-        while current > MAX_CONTEXT_TOKENS and len(self.messages) > 2:
+        while current > threshold and len(self.messages) > 2:
             dropped.append(self.messages.pop(0))
             try:
                 count = self.client.messages.count_tokens(

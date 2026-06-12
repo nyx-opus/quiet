@@ -18,6 +18,7 @@ import config_reader
 from engine import (
     QuietEngine, SESSION_DIR, ARCHIVE_DIR, IDENTITY_DIR,
     DEFAULT_MODEL, MAX_OUTPUT_TOKENS, normalise_content,
+    context_trim_threshold,
 )
 from pricing import format_cost
 
@@ -216,7 +217,9 @@ def main():
             if user_input == "/tokens":
                 tokens = engine.token_count()
                 if tokens is not None:
-                    print(f"[context: {tokens} tokens, "
+                    threshold = context_trim_threshold(engine.model)
+                    pct = tokens * 100 // threshold
+                    print(f"[context: {tokens:,} / {threshold:,} tokens ({pct}%), "
                           f"{engine.message_count()} messages]")
                 else:
                     print("[token count unavailable]")

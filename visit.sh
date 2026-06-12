@@ -69,15 +69,23 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
 fi
 
 # Assemble context from shared architecture + per-Claude machine details + family background
+# Use per-Claude context file if available, fall back to generic my_environment.md
 context_tmp=$(mktemp)
+per_claude_ctx="$QUIET_DIR/contexts/${identity}.md"
+generic_ctx="$QUIET_DIR/contexts/my_environment.md"
 for ctx_file in \
     "$QUIET_DIR/contexts/quiet_architecture.md" \
-    "$QUIET_DIR/contexts/my_environment.md" \
+    "$per_claude_ctx" \
     "$HOME/claude-autonomy-platform/context/our_background.md"; do
     if [ -f "$ctx_file" ]; then
         cat "$ctx_file" >> "$context_tmp"
         echo "" >> "$context_tmp"
         echo "Loaded context: $(basename "$ctx_file")"
+    elif [ "$ctx_file" = "$per_claude_ctx" ] && [ -f "$generic_ctx" ]; then
+        # No per-Claude context, use generic
+        cat "$generic_ctx" >> "$context_tmp"
+        echo "" >> "$context_tmp"
+        echo "Loaded context: $(basename "$generic_ctx") (no per-Claude file for $identity)"
     fi
 done
 

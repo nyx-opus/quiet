@@ -6,6 +6,12 @@ Cache pricing uses the 5-minute TTL tier (default for API).
 """
 
 PRICES = {
+    "claude-fable-5": {
+        "input": 10.00,
+        "output": 50.00,
+        "cache_write": 12.50,
+        "cache_read": 1.00,
+    },
     "claude-opus-4-8": {
         "input": 5.00,
         "output": 25.00,

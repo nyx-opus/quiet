@@ -328,9 +328,116 @@ def quiet_to_ccode(args):
         sys.stdout.write(out_text)
 
 
+def desktop_to_quiet(args):
+    """Convert Claude Desktop JSON export to Quiet session."""
+    with open(args.input) as f:
+        data = json.load(f)
+
+    model = args.model or data.get("model", "claude-fable-5")
+    name = data.get("name", "imported")
+    created = data.get("created_at", datetime.now().isoformat())
+
+    messages = []
+    for msg in data.get("chat_messages", []):
+        sender = msg.get("sender")
+        if sender not in ("human", "assistant"):
+            continue
+
+        role = "user" if sender == "human" else "assistant"
+        content_blocks = []
+
+        for block in msg.get("content", []):
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "thinking":
+                continue  # strip thinking blocks
+            elif btype == "text":
+                text = block.get("text", "").strip()
+                if text:
+                    content_blocks.append({"type": "text", "text": text})
+            elif btype == "tool_use":
+                content_blocks.append({
+                    "type": "tool_use",
+                    "id": block.get("id", ""),
+                    "name": block.get("name", ""),
+                    "input": block.get("input", {}),
+                })
+            elif btype == "tool_result":
+                content_blocks.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.get("tool_use_id", ""),
+                    "content": block.get("content", ""),
+                })
+
+        # Note file attachments as text placeholders
+        for file_info in msg.get("files", []):
+            if isinstance(file_info, dict) and file_info.get("file_name"):
+                content_blocks.append({
+                    "type": "text",
+                    "text": f"[attached image: {file_info['file_name']}]",
+                })
+
+        if not content_blocks:
+            continue
+
+        # Simplify single text block to plain string
+        if len(content_blocks) == 1 and content_blocks[0]["type"] == "text":
+            messages.append({"role": role, "content": content_blocks[0]["text"]})
+        else:
+            messages.append({"role": role, "content": content_blocks})
+
+    # Merge consecutive same-role messages
+    cleaned = []
+    for msg in messages:
+        if cleaned and cleaned[-1]["role"] == msg["role"]:
+            prev = cleaned[-1]
+            prev_content = prev["content"]
+            new_content = msg["content"]
+            if isinstance(prev_content, str):
+                prev_content = [{"type": "text", "text": prev_content}]
+            if isinstance(new_content, str):
+                new_content = [{"type": "text", "text": new_content}]
+            prev["content"] = prev_content + new_content
+        else:
+            cleaned.append(msg)
+
+    # Ensure starts with user
+    while cleaned and cleaned[0]["role"] != "user":
+        cleaned.pop(0)
+
+    # Determine output path
+    if args.output:
+        out_path = Path(args.output)
+    else:
+        safe_name = "".join(c if c.isalnum() or c in "-_ " else "" for c in name)
+        safe_name = safe_name.strip().replace(" ", "-").lower()[:60]
+        out_path = Path(__file__).parent / "sessions" / f"{safe_name}.jsonl"
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as f:
+        f.write(json.dumps({
+            "model": model,
+            "identity": args.identity,
+            "timestamp": created,
+            "imported_from": "claude_desktop",
+            "original_name": name,
+        }) + "\n")
+        for msg in cleaned:
+            f.write(json.dumps(msg) + "\n")
+
+    user_msgs = sum(1 for m in cleaned if m["role"] == "user")
+    asst_msgs = sum(1 for m in cleaned if m["role"] == "assistant")
+    print(f"Wrote {len(cleaned)} messages to {out_path}", file=sys.stderr)
+    print(f"  Model: {model}", file=sys.stderr)
+    print(f"  Messages: {user_msgs} user, {asst_msgs} assistant", file=sys.stderr)
+    if args.identity:
+        print(f"  Identity: {args.identity}", file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert sessions between Claude Code and Quiet formats")
+        description="Convert sessions between Claude Code, Claude Desktop, and Quiet formats")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # ccode-to-quiet
@@ -360,6 +467,17 @@ def main():
     p_q2c.add_argument("--for-resume", action="store_true", dest="for_resume",
                         help="Place output in Claude Code projects dir for --resume")
     p_q2c.set_defaults(func=quiet_to_ccode)
+
+    # desktop-to-quiet
+    p_d2q = subparsers.add_parser("desktop-to-quiet",
+                                   help="Convert Claude Desktop export to Quiet")
+    p_d2q.add_argument("input", help="Claude Desktop JSON export path")
+    p_d2q.add_argument("-o", "--output", help="Output path (default: sessions/<name>.jsonl)")
+    p_d2q.add_argument("--model", default=None,
+                        help="Override model ID in output")
+    p_d2q.add_argument("--identity", default=None,
+                        help="Identity name to tag in header")
+    p_d2q.set_defaults(func=desktop_to_quiet)
 
     args = parser.parse_args()
     args.func(args)
