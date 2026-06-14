@@ -51,7 +51,7 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=MAX_OUTPUT_TOKENS,
                         help=f"Max output tokens (default: {MAX_OUTPUT_TOKENS})")
     parser.add_argument("--auth", default=cfg.get("AUTH_MODE", "auto"),
-                        choices=["auto", "subscription", "api_key"],
+                        choices=["auto", "subscription", "api_key", "openrouter"],
                         help="Auth mode")
     parser.add_argument("--human", default=cfg.get("HUMAN_NAME"),
                         help="Name of the human (shown to model as speaker)")
