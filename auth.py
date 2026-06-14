@@ -156,10 +156,22 @@ def create_client(auth_mode: str = "auto"):
     Modes:
         "subscription" - OAuth subscription token (flat rate, ccode headers)
         "api_key"      - API key from ANTHROPIC_API_KEY env var (pay per token)
+        "openrouter"   - OpenRouter API key from OPENROUTER_API_KEY env var
         "auto"         - subscription if credentials exist, else api_key
     """
     import os
     from anthropic import Anthropic
+
+    if auth_mode == "openrouter":
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENROUTER_API_KEY not set")
+        # OpenRouter has an Anthropic-compatible /messages endpoint.
+        # The SDK appends /v1/messages to base_url, so base is /api/.
+        return Anthropic(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/",
+        ), "openrouter"
 
     if auth_mode == "api_key":
         api_key = os.environ.get("ANTHROPIC_API_KEY")
