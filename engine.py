@@ -81,7 +81,8 @@ def load_ambient_image(path: str) -> dict:
 
 def build_system_prompt(identity_text: str, human_name: str = None,
                         system_prefix: str = None,
-                        ambient_images: list = None) -> list:
+                        ambient_images: list = None,
+                        context: str = None) -> list:
     blocks = []
     if system_prefix:
         blocks.append({"type": "text", "text": system_prefix})
@@ -94,6 +95,8 @@ def build_system_prompt(identity_text: str, human_name: str = None,
             "text": f"The human you are talking to is {human_name}. "
                     f"Messages from the user role are from {human_name}.",
         })
+    if context:
+        blocks.append({"type": "text", "text": context})
     if ambient_images:
         # Note: images can't go in system prompt (API restriction).
         # They're injected as early conversation turns instead.
@@ -313,7 +316,8 @@ class QuietEngine:
         self.system = build_system_prompt(
             identity_text, human_name=human_name,
             system_prefix=system_prefix,
-            ambient_images=ambient_images)
+            ambient_images=ambient_images,
+            context=context)
         self._initial_context = context or ""
         self._ambient_images = ambient_images or []
 
