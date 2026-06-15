@@ -456,6 +456,20 @@ class QuietEngine:
                     continue
             if not self.messages:
                 self._inject_context()
+            else:
+                # Mark that continuity was maintained by resuming
+                from datetime import datetime
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+                self.messages.append({
+                    "role": "user",
+                    "content": [{"type": "text",
+                                 "text": f"[Session resumed — {ts}]"}],
+                })
+                self.messages.append({
+                    "role": "assistant",
+                    "content": [{"type": "text",
+                                 "text": "I'm here. Continuing."}],
+                })
         else:
             self._inject_context()
 
