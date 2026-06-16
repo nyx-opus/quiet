@@ -166,13 +166,14 @@ def define_tools():
 def execute_tool(name: str, input_data: dict) -> str:
     if name == "bash":
         try:
+            home = os.path.expanduser("~")
             result = subprocess.run(
                 input_data["command"],
                 shell=True,
                 capture_output=True,
                 text=True,
                 timeout=120,
-                cwd=os.path.expanduser("~"),
+                cwd=home,
                 stdin=subprocess.DEVNULL,
             )
             output = result.stdout
@@ -180,7 +181,10 @@ def execute_tool(name: str, input_data: dict) -> str:
                 output += f"\n[stderr]\n{result.stderr}"
             if result.returncode != 0:
                 output += f"\n[exit code: {result.returncode}]"
-            return output or "(no output)"
+            # Prepend user and working directory so the model knows where it is
+            import getpass
+            cwd_line = f"[{getpass.getuser()}@{home}]\n"
+            return cwd_line + (output or "(no output)")
         except subprocess.TimeoutExpired:
             return "[command timed out after 120s]"
         except Exception as e:
