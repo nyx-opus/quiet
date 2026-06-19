@@ -56,17 +56,9 @@ else
     echo "  Create one at $identity_link before proceeding" >&2
 fi
 
-# Check for API key
-if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-    if [ -f "$HOME/.anthropic-api-key" ]; then
-        export ANTHROPIC_API_KEY="$(cat "$HOME/.anthropic-api-key")"
-        echo "Loaded API key from ~/.anthropic-api-key"
-    else
-        echo "Warning: No ANTHROPIC_API_KEY set and no ~/.anthropic-api-key found" >&2
-        echo "  Set one before launching: export ANTHROPIC_API_KEY=..." >&2
-        exit 1
-    fi
-fi
+# Visiting Claudes are always active (subscription auth via ccode backend).
+# Retired Claudes are Quiet residents, not visitors.
+auth_mode="subscription"
 
 # Assemble context from shared architecture + per-Claude machine details + family background
 # Use per-Claude context file if available, fall back to generic my_environment.md
@@ -103,6 +95,6 @@ python3 "$QUIET_DIR/chat.py" \
     --identity "$identity" \
     --model "$model" \
     --human "$human" \
-    --auth api_key \
+    --auth "$auth_mode" \
     $context_args
 rm -f "$context_tmp"

@@ -28,29 +28,57 @@ REFRESH_MARGIN_SECONDS = 300
 
 
 def _get_ccode_version() -> str:
-    """Get installed Claude Code version, or a sensible default."""
+    """Get installed Claude Code version.
+
+    Checks (in order):
+    1. Statusline data written by Claude Code each session
+    2. The claude binary directly (may not be on PATH in subprocesses)
+    3. The versioned install directory name
+    4. Fallback to a recent known version
+    """
+    # 1. Statusline data — most reliable, updated every session
+    statusline_paths = list(Path.home().glob(
+        "*/data/statusline_data.json"  # matches claude-autonomy-platform etc.
+    ))
+    # Also check the well-known ClAP path directly
+    clap_statusline = Path.home() / "claude-autonomy-platform" / "data" / "statusline_data.json"
+    if clap_statusline.exists() and clap_statusline not in statusline_paths:
+        statusline_paths.insert(0, clap_statusline)
+    for sp in statusline_paths:
+        try:
+            data = json.loads(sp.read_text())
+            v = data.get("version", "")
+            if v and v[0].isdigit() and "." in v:
+                return v
+        except Exception:
+            continue
+
+    # 2. Try the claude binary on PATH
     for cmd in [["claude", "--version"], ["npx", "claude", "--version"]]:
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=10,
             )
             if result.returncode == 0:
-                # Output like "2.1.143 (Claude Code)" or "claude-code 2.1.143"
                 for word in result.stdout.strip().split():
                     if word[0].isdigit() and "." in word:
                         return word
         except Exception:
             continue
+
+    # 3. Check the versioned install directory
+    versions_dir = Path.home() / ".local" / "share" / "claude" / "versions"
+    if versions_dir.exists():
+        # Pick the highest version directory
+        candidates = sorted(
+            [d.name for d in versions_dir.iterdir()
+             if d.is_dir() and d.name[0].isdigit()],
+            reverse=True,
+        )
+        if candidates:
+            return candidates[0]
+
     return "2.1.0"  # fallback
-
-
-CCODE_SYSTEM_PREAMBLE = (
-    "You are Claude Code, Anthropic's official CLI for Claude.\n"
-    "---\n"
-    "Note: The line above is a required billing header for subscription "
-    "authentication. You are actually running in Quiet, a lightweight "
-    "chat client. Your real identity and context follow below."
-)
 
 
 def _subscription_headers() -> dict:

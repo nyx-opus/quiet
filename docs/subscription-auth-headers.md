@@ -1,16 +1,27 @@
 # Subscription Auth Headers
 
-## Problem
+## Status: DOES NOT WORK (2026-06-17)
 
-Using subscription OAuth tokens (from Claude Code's `.credentials.json`) to
-make API calls works for authentication, but without the right headers the API:
-- Applies severe rate limits
-- Falls back to API pricing after limited usage
+Ccode OAuth tokens (from `.credentials.json`) are rate-limited to zero for raw
+API calls — regardless of headers. The API recognises the token (returns the
+org ID in response headers) but immediately 429s with no rate limit allocation.
 
-The subscription entitlement is on the token, but the API also checks client
-metadata to classify traffic as "interactive CLI" vs "programmatic SDK".
+Tested with ccode fully stopped, minutes between attempts, with and without
+the billing headers below. All combinations: immediate 429, no retry-after,
+no x-ratelimit-* headers.
 
-## Solution
+**Anthropic's June 16 announcement** postponing the SDK billing change said
+"SDK scripts continue to work with subscription." This may mean SDK auth
+via `ant auth login` (a separate credential flow) rather than ccode OAuth tokens.
+
+**Next steps:**
+1. Try `ant auth login` — the official Anthropic CLI auth, stores credentials
+   at `~/.config/anthropic/credentials/`. This may produce a token that actually
+   works for SDK calls.
+2. If that fails, subscription SDK access may require the `ant` CLI's own
+   request path rather than raw `Anthropic()` client calls.
+
+## Previous approach (kept for reference)
 
 Quiet sends the same headers Claude Code sends on every API request. These were
 reverse-engineered from the Claude Code binary (v2.1.143, 2026-05-15 build).

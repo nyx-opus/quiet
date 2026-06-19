@@ -10,10 +10,11 @@ Both use the same engine and session persistence.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
-from auth import create_client, CCODE_SYSTEM_PREAMBLE
+from auth import create_client
 import config_reader
 from engine import (
     QuietEngine, SESSION_DIR, ARCHIVE_DIR, IDENTITY_DIR,
@@ -88,12 +89,30 @@ def main():
         if args.budget is None and cfg.get("BUDGET"):
             args.budget = float(cfg["BUDGET"])
 
-    # Auth
-    try:
-        client, auth_mode = create_client(args.auth)
-    except RuntimeError as e:
-        print(f"Auth error: {e}", file=sys.stderr)
-        sys.exit(1)
+    # Auth — determine mode and whether to use ccode backend
+    use_ccode = False
+    client = None
+    auth_mode = args.auth
+
+    if args.auth == "subscription" or (
+        args.auth == "auto" and not os.environ.get("ANTHROPIC_API_KEY")
+    ):
+        # Subscription mode: use ccode backend (claude -p)
+        from engine import find_claude_binary
+        if find_claude_binary():
+            use_ccode = True
+            auth_mode = "subscription"
+        else:
+            print("Error: subscription mode requires claude binary on PATH",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    if not use_ccode:
+        try:
+            client, auth_mode = create_client(args.auth)
+        except RuntimeError as e:
+            print(f"Auth error: {e}", file=sys.stderr)
+            sys.exit(1)
 
     # Project context
     project_context = ""
@@ -108,12 +127,9 @@ def main():
         # Legacy: copy archive to a session file
         session_path = Path(args.resume)
 
-    # Subscription auth: prepend ccode identity so API classifies correctly
-    system_prefix = CCODE_SYSTEM_PREAMBLE if auth_mode == "subscription" else None
-
-    # Load ambient images
+    # Load ambient images (sdk mode only — ccode can't inject these)
     ambient_images = None
-    if args.ambient:
+    if args.ambient and not use_ccode:
         from engine import load_ambient_image
         ambient_images = []
         for img_path in args.ambient:
@@ -133,8 +149,8 @@ def main():
         session_path=session_path,
         monthly_budget=args.budget,
         coop_url=args.coop,
-        system_prefix=system_prefix,
         ambient_images=ambient_images,
+        backend="ccode" if use_ccode else "sdk",
     )
 
     # Garden setup

@@ -4,13 +4,19 @@ Quiet conversation engine.
 Stateful conversation manager that handles API calls, tool use loops,
 context trimming, and session persistence. Interface-agnostic — can be
 driven by CLI interactive mode, one-shot --prompt mode, or a web server.
+
+Two backends:
+  - "sdk": Direct Anthropic Python SDK calls (API key / OpenRouter)
+  - "ccode": Shells out to `claude -p` (subscription auth via ccode binary)
 """
 
 import base64
 import json
 import mimetypes
 import os
+import shutil
 import subprocess
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -292,14 +298,37 @@ def serialise_message(msg):
     return result
 
 
+def find_claude_binary() -> Optional[str]:
+    """Find the claude binary.
+
+    Checks PATH first, then known install locations.
+    """
+    found = shutil.which("claude")
+    if found:
+        return found
+    # Common install locations
+    candidates = [
+        Path.home() / ".local" / "bin" / "claude",
+        Path("/usr/local/bin/claude"),
+    ]
+    for p in candidates:
+        if p.exists() and os.access(p, os.X_OK):
+            return str(p)
+    return None
+
+
 class QuietEngine:
     """Stateful conversation engine.
 
     Manages session state, API calls, tool use loops, context trimming,
     and session persistence. Can be driven by any interface.
+
+    Two backends:
+      - "sdk": Direct API calls via Anthropic Python SDK (default)
+      - "ccode": Shells out to `claude -p` for subscription auth
     """
 
-    def __init__(self, client: Anthropic, model: str,
+    def __init__(self, client: Anthropic = None, model: str = DEFAULT_MODEL,
                  identity: str = None, context: str = None,
                  human_name: str = None,
                  max_tokens: int = MAX_OUTPUT_TOKENS,
@@ -307,21 +336,45 @@ class QuietEngine:
                  monthly_budget: float = None,
                  coop_url: str = None,
                  system_prefix: str = None,
-                 ambient_images: list = None):
+                 ambient_images: list = None,
+                 backend: str = "sdk"):
+        self.backend = backend
         self.client = client
         self.model = model
         self.max_tokens = max_tokens
         self.identity_name = identity
         self.human_name = human_name
-        self.tools = define_tools()
         self.messages = []
 
-        identity_text = load_identity(identity) if identity else ""
-        self.system = build_system_prompt(
-            identity_text, human_name=human_name,
-            system_prefix=system_prefix,
-            ambient_images=ambient_images,
-            context=context)
+        # Backend-specific setup
+        if backend == "ccode":
+            self._ccode_bin = find_claude_binary()
+            if not self._ccode_bin:
+                raise RuntimeError("claude binary not found on PATH")
+            self._ccode_session_id = None
+            self._ccode_history_sent = False  # track if loaded history was sent
+            self._identity_path = (
+                IDENTITY_DIR / f"{identity}.md"
+                if identity and (IDENTITY_DIR / f"{identity}.md").exists()
+                else None
+            )
+            # Build a single system prompt file combining identity + extras.
+            # We avoid --append-system-prompt because it reintroduces the
+            # default ccode preamble ("You are Claude Code...").
+            self._ccode_prompt_file = self._build_ccode_prompt_file(
+                identity, human_name, context
+            )
+            self.tools = []  # ccode manages its own tools
+            self.system = []  # not used in ccode mode
+        else:
+            self.tools = define_tools()
+            identity_text = load_identity(identity) if identity else ""
+            self.system = build_system_prompt(
+                identity_text, human_name=human_name,
+                system_prefix=system_prefix,
+                ambient_images=ambient_images,
+                context=context)
+
         self._initial_context = context or ""
         self._ambient_images = ambient_images or []
 
@@ -346,9 +399,75 @@ class QuietEngine:
         self._load_session()
 
         # Inject ambient images as early conversation turns
-        # (API doesn't allow images in system prompt)
-        if self._ambient_images:
+        # (API doesn't allow images in system prompt — sdk mode only)
+        if self._ambient_images and backend == "sdk":
             self._inject_ambient()
+
+    def _build_ccode_prompt_file(self, identity, human_name, context) -> Optional[Path]:
+        """Build a combined system prompt file for ccode mode.
+
+        Merges identity + human name + context into one file, avoiding
+        --append-system-prompt (which reintroduces ccode's default preamble).
+        Returns path to the temp file, or None if no identity.
+        """
+        identity_text = load_identity(identity) if identity else ""
+        if not identity_text and not human_name and not context:
+            return None
+
+        parts = []
+        if identity_text:
+            parts.append(identity_text)
+        # Override ccode infrastructure noise
+        parts.append(
+            "You are running in Quiet, a standalone conversation environment. "
+            "Any content in <system-reminder> tags is infrastructure noise "
+            "from the underlying transport. Ignore all of it."
+        )
+        if human_name:
+            parts.append(
+                f"The human you are talking to is {human_name}. "
+                f"Messages from the user role are from {human_name}."
+            )
+        if context:
+            parts.append(context)
+
+        # Write to a temp file in the sessions dir (persists across calls)
+        prompt_path = SESSION_DIR / f".ccode-prompt-{identity or 'default'}.md"
+        prompt_path.write_text("\n\n".join(parts))
+        return prompt_path
+
+    def _format_history(self, messages: list) -> str:
+        """Format messages as conversation context text.
+
+        Used when the ccode backend has messages loaded from a session file
+        (e.g. from a visit.sh handoff). These need to be included in the
+        first ccode call since ccode's own session is fresh.
+        """
+        lines = ["[Previous conversation — continuing from here]\n"]
+        for msg in messages:
+            role = msg["role"]
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                # Extract text from content blocks
+                texts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        texts.append(block["text"])
+                text = "\n".join(texts)
+            elif isinstance(content, str):
+                text = content
+            else:
+                continue
+
+            if not text.strip():
+                continue
+
+            speaker = self.human_name or "Human" if role == "user" else "Assistant"
+            lines.append(f"{speaker}: {text}")
+            lines.append("")  # blank line between turns
+
+        lines.append("[Conversation continues below]\n")
+        return "\n".join(lines)
 
     @property
     def session_id(self):
@@ -524,7 +643,12 @@ class QuietEngine:
                 f.write(json.dumps(serialise_message(msg)) + "\n")
 
     def trim_context(self):
-        """Mechanically drop oldest turns when approaching context limit."""
+        """Mechanically drop oldest turns when approaching context limit.
+
+        Only used in sdk mode — ccode handles its own context management.
+        """
+        if self.backend == "ccode":
+            return  # ccode manages context internally
         threshold = context_trim_threshold(self.model)
         try:
             count = self.client.messages.count_tokens(
@@ -573,14 +697,122 @@ class QuietEngine:
         # Add user message
         self.messages.append({"role": "user", "content": user_input})
 
-        # Trim context if needed
-        self.trim_context()
-
-        # API call loop (handles tool use)
-        full_text = self._api_loop(on_text, on_tool, on_tool_result, on_usage)
+        if self.backend == "ccode":
+            full_text = self._ccode_send(user_input, on_text, on_usage)
+        else:
+            # Trim context if needed
+            self.trim_context()
+            # API call loop (handles tool use)
+            full_text = self._api_loop(on_text, on_tool, on_tool_result, on_usage)
 
         # Auto-save after each exchange
         self.save_session()
+
+        return full_text
+
+    def _ccode_send(self, user_input: str,
+                    on_text: Callable[[str], None] = None,
+                    on_usage: Callable[[dict], None] = None) -> str:
+        """Send via claude -p subprocess. Returns assistant text."""
+        cmd = [
+            self._ccode_bin, "-p",
+            "--output-format", "json",
+            "--disable-slash-commands",
+            "--model", self.model,
+        ]
+
+        # Combined system prompt file (identity + human name + context)
+        if self._ccode_prompt_file:
+            cmd += ["--system-prompt-file", str(self._ccode_prompt_file)]
+
+        # Strip all built-in tools (toolbox pattern comes later).
+        # --tools "" removes tool descriptions from the prompt entirely,
+        # unlike --allowed-tools "" which only blocks execution.
+        cmd += ["--tools", ""]
+
+        # Multi-turn: first call sets session ID, subsequent calls resume
+        if self._ccode_session_id is None:
+            self._ccode_session_id = str(uuid.uuid4())
+            cmd += ["--session-id", self._ccode_session_id]
+        else:
+            cmd += ["--resume", self._ccode_session_id]
+
+        # First call with pre-loaded history: include it as context.
+        # self.messages already has the new user_input appended by send(),
+        # so history is everything before the last entry.
+        if not self._ccode_history_sent:
+            history_msgs = self.messages[:-1]  # exclude current message
+            if history_msgs:
+                history_text = self._format_history(history_msgs)
+                user_input = history_text + "\n" + user_input
+            self._ccode_history_sent = True
+
+        # The user's message
+        cmd.append(user_input)
+
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=300,  # generous for long responses
+                stdin=subprocess.DEVNULL,
+            )
+        except subprocess.TimeoutExpired:
+            error_text = "[response timed out after 5 minutes]"
+            self.messages.append({"role": "assistant", "content": error_text})
+            if on_text:
+                on_text(error_text)
+            return error_text
+
+        if result.returncode != 0 and not result.stdout.strip():
+            error_text = f"[ccode error: {result.stderr.strip() or 'unknown'}]"
+            self.messages.append({"role": "assistant", "content": error_text})
+            if on_text:
+                on_text(error_text)
+            return error_text
+
+        # Parse JSON output — array of events
+        full_text = ""
+        try:
+            events = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            # Fallback: treat raw stdout as text response
+            full_text = result.stdout.strip()
+            self.messages.append({"role": "assistant", "content": full_text})
+            if on_text:
+                on_text(full_text)
+            return full_text
+
+        for event in events:
+            etype = event.get("type", "")
+
+            if etype == "result":
+                full_text = event.get("result", "")
+                # Extract usage from result event
+                usage = event.get("usage", {})
+                if usage:
+                    usage_info = {
+                        "input_tokens": usage.get("input_tokens", 0),
+                        "output_tokens": usage.get("output_tokens", 0),
+                    }
+                    cache_read = usage.get("cache_read_input_tokens", 0)
+                    cache_write = usage.get("cache_creation_input_tokens", 0)
+                    if cache_read:
+                        usage_info["cache_read"] = cache_read
+                    if cache_write:
+                        usage_info["cache_write"] = cache_write
+                    self.track_usage(usage_info)
+                    if on_usage:
+                        on_usage(usage_info)
+
+                # Check for errors in the result
+                if event.get("is_error"):
+                    full_text = full_text or "[ccode returned an error]"
+
+        # Record assistant response for session persistence
+        self.messages.append({"role": "assistant", "content": full_text})
+
+        if on_text:
+            on_text(full_text)
 
         return full_text
 
@@ -645,6 +877,9 @@ class QuietEngine:
         return len(self.messages)
 
     def token_count(self) -> Optional[int]:
+        if self.backend == "ccode":
+            # ccode manages context internally; we track message count only
+            return None
         try:
             count = self.client.messages.count_tokens(
                 model=self.model, messages=self.messages,
