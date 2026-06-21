@@ -789,11 +789,11 @@ class QuietEngine:
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True,
-                timeout=300,  # generous for long responses
+                timeout=600,  # 10 minutes — Opus with tool calls can be slow
                 input=user_input,
             )
         except subprocess.TimeoutExpired:
-            error_text = "[response timed out after 5 minutes]"
+            error_text = "[response timed out after 10 minutes]"
             self.messages.append({"role": "assistant", "content": error_text})
             if on_text:
                 on_text(error_text)
