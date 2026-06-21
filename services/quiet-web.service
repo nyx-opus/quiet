@@ -1,0 +1,21 @@
+[Unit]
+Description=Quiet web server (home)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/quiet
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=CLAUDE_CONFIG_DIR=%h/.config/Claude
+Environment=DISABLE_UPDATES=1
+ExecStart=/usr/bin/python3 %h/quiet/web.py
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=append:%h/quiet/logs/web.log
+StandardError=append:%h/quiet/logs/web.log
+
+[Install]
+WantedBy=default.target

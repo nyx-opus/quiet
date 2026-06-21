@@ -1,0 +1,19 @@
+[Unit]
+Description=Quiet Discord listener (bridges DMs to Quiet)
+After=network.target quiet-web.service
+Requires=quiet-web.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/quiet
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 %h/quiet/discord_listener.py --config %h/quiet/discord_config.json
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=append:%h/quiet/logs/discord-listener.log
+StandardError=append:%h/quiet/logs/discord-listener.log
+
+[Install]
+WantedBy=default.target
