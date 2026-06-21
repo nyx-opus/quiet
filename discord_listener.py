@@ -60,6 +60,8 @@ class QuietDiscordBot(discord.Client):
         self.quiet_url = config.get("quiet_url", "http://localhost:8090")
         self.channels = config.get("channels", {})
         self.dm_allow = set(config.get("dm_allow", []))
+        self.user_names = {str(k): v for k, v in
+                           config.get("user_names", {}).items()}
         self.http_session = None
 
         # Transcript storage
@@ -106,7 +108,8 @@ class QuietDiscordBot(discord.Client):
         elif channel_id not in self.channels:
             return
 
-        sender = message.author.display_name
+        sender = self.user_names.get(str(message.author.id),
+                                      message.author.display_name)
         content = message.content
 
         # Download attachments
@@ -166,12 +169,14 @@ class QuietDiscordBot(discord.Client):
 
     async def handle_direct(self, message, sender, content, channel_name):
         """Handle DM or mention — inject into session and respond."""
-        source = f"discord #{channel_name}" if not isinstance(
-            message.channel, discord.DMChannel) else "discord DM"
-        print(f"[direct] [{source}] {sender}: {content[:80]}")
+        is_dm = isinstance(message.channel, discord.DMChannel)
+        source = "DM" if is_dm else f"#{channel_name}"
+        print(f"[direct] [discord {source}] {sender}: {content[:80]}")
+
+        tagged = f"[discord · {source} from {sender}] {content}"
 
         try:
-            response_text = await self.send_to_quiet(content)
+            response_text = await self.send_to_quiet(tagged)
             if response_text:
                 for i in range(0, len(response_text), 1900):
                     chunk = response_text[i:i + 1900]
@@ -183,18 +188,28 @@ class QuietDiscordBot(discord.Client):
             print(f"  → error: {e}", file=sys.stderr)
 
     async def handle_ambient(self, sender, content, channel_name):
-        """Handle channel message — notify session, don't inject full text."""
+        """Handle channel message — mark channel as having unreads.
+
+        No prompt injection. The web server will notice unreads on the
+        next incoming prompt and prepend a notification like:
+        [Unread messages in #general, #apple-delta]
+        """
         print(f"[ambient] #{channel_name} {sender}: {content[:80]}")
+        self.mark_unread(channel_name)
 
-        # Send a brief notification to the session
-        preview = content[:60] + "..." if len(content) > 60 else content
-        notification = (f"*ding* New message in #{channel_name} from "
-                        f"{sender}: \"{preview}\"")
-
+    def mark_unread(self, channel_name: str):
+        """Add channel to the unread set. Web server reads and clears this."""
+        unread_path = Path(__file__).parent / "unread_channels.json"
         try:
-            await self.send_to_quiet(notification)
-        except Exception as e:
-            print(f"  → notify error: {e}", file=sys.stderr)
+            if unread_path.exists():
+                channels = set(json.loads(unread_path.read_text()))
+            else:
+                channels = set()
+            channels.add(channel_name)
+            unread_path.write_text(json.dumps(sorted(channels)))
+        except (json.JSONDecodeError, OSError):
+            # If the file is corrupted or being cleared, just overwrite
+            unread_path.write_text(json.dumps([channel_name]))
 
     async def send_to_quiet(self, content: str) -> str:
         """POST message to Quiet web server and return response text."""

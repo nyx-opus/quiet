@@ -10,3 +10,7 @@ inbox/
 transcripts/
 contexts/my_environment.md
 config/quiet_config.txt
+config/discord_config.json
+discord_config.json
+unread_channels.json
+logs/

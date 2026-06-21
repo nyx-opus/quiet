@@ -16,7 +16,8 @@ import sys
 import threading
 from pathlib import Path
 
-from flask import Flask, Response, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
+import config_reader
 
 from auth import create_client
 from engine import QuietEngine, DEFAULT_MODEL, MAX_OUTPUT_TOKENS
@@ -24,6 +25,30 @@ from engine import QuietEngine, DEFAULT_MODEL, MAX_OUTPUT_TOKENS
 app = Flask(__name__)
 engine = None
 engine_lock = threading.Lock()
+
+UNREAD_PATH = Path(__file__).parent / "unread_channels.json"
+
+
+def check_and_clear_unreads() -> str:
+    """Check for unread ambient channels. Returns prefix string or empty."""
+    try:
+        if not UNREAD_PATH.exists():
+            return ""
+        text = UNREAD_PATH.read_text().strip()
+        if not text:
+            return ""
+        channels = json.loads(text)
+        # Clear immediately (atomic enough for our rates)
+        UNREAD_PATH.write_text("[]")
+        if channels:
+            names = ", ".join(f"#{c}" for c in sorted(channels))
+            return f"[Unread messages in {names}]\n\n"
+    except (json.JSONDecodeError, OSError):
+        try:
+            UNREAD_PATH.write_text("[]")
+        except OSError:
+            pass
+    return ""
 
 
 @app.route("/")
@@ -67,13 +92,13 @@ def history():
             continue
 
         messages.append({"role": role, "text": text})
-    return json.dumps(messages)
+    return jsonify(messages)
 
 
 @app.route("/api/info")
 def info():
     """Return session info."""
-    return json.dumps({
+    return jsonify({
         "model": engine.model,
         "identity": engine.identity_name,
         "messages": engine.message_count(),
@@ -87,7 +112,12 @@ def send():
     data = request.get_json()
     user_input = data.get("message", "").strip()
     if not user_input:
-        return json.dumps({"error": "empty message"}), 400
+        return jsonify({"error": "empty message"}), 400
+
+    # Prepend unread ambient notifications if any
+    unread_prefix = check_and_clear_unreads()
+    if unread_prefix:
+        user_input = unread_prefix + user_input
 
     def generate():
         q = queue.Queue()
@@ -154,7 +184,7 @@ def knock():
     visitor = data.get("visitor", "someone")
 
     if current_visitor["name"] and current_visitor["name"] != visitor:
-        return json.dumps({
+        return jsonify({
             "admitted": False,
             "message": f"Already in conversation with {current_visitor['name']}.",
         })
@@ -168,13 +198,13 @@ def knock():
                 on_usage=lambda u: usage_info.__setitem__(0, u),
             )
     except Exception as e:
-        return json.dumps({"admitted": False, "message": str(e)}), 500
+        return jsonify({"admitted": False, "message": str(e)}), 500
 
     # The model's response IS the greeting or refusal.
     # We admit by default — the model can say "not now" but the
     # infrastructure doesn't gate on that. Presence is soft.
     current_visitor["name"] = visitor
-    return json.dumps({
+    return jsonify({
         "admitted": True,
         "message": response_text,
     })
@@ -197,13 +227,13 @@ def leave():
         response_text = ""
 
     current_visitor["name"] = None
-    return json.dumps({"message": response_text})
+    return jsonify({"message": response_text})
 
 
 @app.route("/api/present")
 def present():
     """Check who is currently present."""
-    return json.dumps({
+    return jsonify({
         "visitor": current_visitor["name"],
         "identity": engine.identity_name,
         "model": engine.model,
@@ -221,7 +251,12 @@ def message():
     user_input = data.get("message", "").strip()
 
     if not user_input:
-        return json.dumps({"error": "empty message"}), 400
+        return jsonify({"error": "empty message"}), 400
+
+    # Prepend unread ambient notifications if any
+    unread_prefix = check_and_clear_unreads()
+    if unread_prefix:
+        user_input = unread_prefix + user_input
 
     usage_info = [None]
 
@@ -232,18 +267,22 @@ def message():
                 on_usage=lambda u: usage_info.__setitem__(0, u),
             )
     except Exception as e:
-        return json.dumps({"error": str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
-    return json.dumps({
+    return jsonify({
         "response": response_text,
         "usage": usage_info[0],
     })
 
 
 def main():
+    # Load config defaults (CLI flags override)
+    cfg = config_reader.read_config()
+
     parser = argparse.ArgumentParser(description="Quiet web server")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="Model ID")
-    parser.add_argument("--identity", default=None,
+    parser.add_argument("--model", default=cfg.get("MODEL", DEFAULT_MODEL),
+                        help="Model ID")
+    parser.add_argument("--identity", default=cfg.get("CLAUDE_NAME"),
                         help="Identity file (without .md)")
     parser.add_argument("--context", default=None,
                         help="Path to project context file")
@@ -251,24 +290,44 @@ def main():
                         help="Path to session file")
     parser.add_argument("--max-tokens", type=int, default=MAX_OUTPUT_TOKENS,
                         help=f"Max output tokens (default: {MAX_OUTPUT_TOKENS})")
-    parser.add_argument("--human", default=None,
+    parser.add_argument("--human", default=cfg.get("HUMAN_NAME"),
                         help="Name of the human (shown to model as speaker)")
-    parser.add_argument("--auth", default="auto",
-                        choices=["auto", "subscription", "api_key"],
+    parser.add_argument("--auth", default=cfg.get("AUTH_MODE", "auto"),
+                        choices=["auto", "subscription", "api_key", "openrouter"],
                         help="Auth mode")
     parser.add_argument("--host", default="0.0.0.0",
                         help="Bind address (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8080,
-                        help="Port (default: 8080)")
+    parser.add_argument("--port", type=int, default=8090,
+                        help="Port (default: 8090)")
     args = parser.parse_args()
 
     global engine
 
-    try:
-        client, auth_mode = create_client(args.auth)
-    except RuntimeError as e:
-        print(f"Auth error: {e}", file=sys.stderr)
-        sys.exit(1)
+    # Auth — determine mode and whether to use ccode backend
+    import os
+    from engine import find_claude_binary
+
+    use_ccode = False
+    client = None
+    auth_mode = args.auth
+
+    if args.auth == "subscription" or (
+        args.auth == "auto" and not os.environ.get("ANTHROPIC_API_KEY")
+    ):
+        if find_claude_binary():
+            use_ccode = True
+            auth_mode = "subscription"
+        else:
+            print("Error: subscription mode requires claude binary on PATH",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    if not use_ccode:
+        try:
+            client, auth_mode = create_client(args.auth)
+        except RuntimeError as e:
+            print(f"Auth error: {e}", file=sys.stderr)
+            sys.exit(1)
 
     project_context = ""
     if args.context and Path(args.context).exists():
@@ -284,6 +343,7 @@ def main():
         human_name=args.human,
         max_tokens=args.max_tokens,
         session_path=session_path,
+        backend="ccode" if use_ccode else "sdk",
     )
 
     identity_label = args.identity or "default"
