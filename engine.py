@@ -816,7 +816,7 @@ class QuietEngine:
         # Parse JSON output — array of events
         full_text = ""
         try:
-            events = json.loads(result.stdout)
+            parsed = json.loads(result.stdout)
         except json.JSONDecodeError:
             # Fallback: treat raw stdout as text response
             full_text = result.stdout.strip()
@@ -825,6 +825,18 @@ class QuietEngine:
                 on_text(full_text)
             return full_text
 
+        # Handle both single-object and array formats
+        if isinstance(parsed, dict):
+            events = [parsed]
+        elif isinstance(parsed, list):
+            events = parsed
+        else:
+            events = []
+
+        event_types = [e.get("type") for e in events if isinstance(e, dict)]
+        print(f"[ccode] parsed {len(events)} events, types: {event_types}",
+              file=_sys.stderr, flush=True)
+
         for event in events:
             if not isinstance(event, dict):
                 continue
@@ -832,6 +844,10 @@ class QuietEngine:
 
             if etype == "result":
                 full_text = event.get("result", "")
+                print(f"[ccode] result event: result_len={len(full_text)} "
+                      f"is_error={event.get('is_error')} "
+                      f"preview={repr(full_text[:200])}",
+                      file=_sys.stderr, flush=True)
                 # Extract usage from result event
                 usage = event.get("usage", {})
                 if usage:
@@ -852,6 +868,37 @@ class QuietEngine:
                 # Check for errors in the result
                 if event.get("is_error"):
                     full_text = full_text or "[ccode returned an error]"
+
+        # Fallback: if result event had empty text, try extracting from
+        # assistant events (some ccode versions structure output differently)
+        if not full_text:
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                if event.get("type") == "assistant":
+                    msg = event.get("message", {})
+                    content = msg.get("content", [])
+                    if isinstance(content, list):
+                        texts = [b.get("text", "") for b in content
+                                 if isinstance(b, dict) and b.get("type") == "text"]
+                        if texts:
+                            full_text = "\n".join(texts)
+                            print(f"[ccode] extracted text from assistant event: "
+                                  f"len={len(full_text)}",
+                                  file=_sys.stderr, flush=True)
+                            break
+                    elif isinstance(content, str) and content:
+                        full_text = content
+                        break
+
+        # Last resort: if still empty but stdout had content, something
+        # unexpected happened — use raw stdout and log a warning
+        if not full_text and result.stdout.strip():
+            print(f"[ccode] WARNING: no text extracted from events. "
+                  f"Raw stdout[:500]: {result.stdout.strip()[:500]}",
+                  file=_sys.stderr, flush=True)
+            # Don't use raw stdout (it's JSON), but flag the problem
+            full_text = "[response received but could not be parsed — check service logs]"
 
         # Record assistant response for session persistence
         self.messages.append({"role": "assistant", "content": full_text})
