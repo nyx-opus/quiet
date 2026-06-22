@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .env
 archives/
+archive/
 venv/
 .venv/
 sessions/
