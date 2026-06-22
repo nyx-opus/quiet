@@ -101,23 +101,36 @@ function scrollToBottom() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-// Parse SSE lines from a text chunk, handling partial lines across chunks
-function parseSSE(text, callback) {
-  const lines = text.split('\n');
-  let currentEvent = null;
-  for (const line of lines) {
-    if (line.startsWith('event: ')) {
-      currentEvent = line.slice(7).trim();
-    } else if (line.startsWith('data: ') && currentEvent) {
-      try {
-        const data = JSON.parse(line.slice(6));
-        callback(currentEvent, data);
-      } catch (e) {
-        console.error('SSE parse error:', e, line);
+// Buffered SSE parser — handles chunk boundaries correctly.
+// Events are only processed after the \n\n delimiter is seen,
+// so split reads can't lose data.
+function createSSEParser(callback) {
+  let buffer = '';
+  return function feed(chunk) {
+    buffer += chunk;
+    const parts = buffer.split('\n\n');
+    buffer = parts.pop();  // keep incomplete tail
+    for (const part of parts) {
+      if (!part.trim()) continue;
+      const lines = part.split('\n');
+      let eventType = null;
+      let dataStr = null;
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          eventType = line.slice(7).trim();
+        } else if (line.startsWith('data: ')) {
+          dataStr = line.slice(6);
+        }
       }
-      currentEvent = null;
+      if (eventType && dataStr !== null) {
+        try {
+          callback(eventType, JSON.parse(dataStr));
+        } catch (e) {
+          console.error('SSE parse error:', e, dataStr);
+        }
+      }
     }
-  }
+  };
 }
 
 // Send message
@@ -152,13 +165,7 @@ async function sendMessage() {
 
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      const chunk = decoder.decode(value, { stream: true });
-      parseSSE(chunk, (eventType, data) => {
+    const feedSSE = createSSEParser((eventType, data) => {
         if (eventType === 'text') {
           assistantDiv.textContent += data;
           scrollToBottom();
@@ -169,7 +176,12 @@ async function sendMessage() {
           assistantDiv.textContent += `\n[error: ${data}]`;
           scrollToBottom();
         }
-      });
+    });
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      feedSSE(decoder.decode(value, { stream: true }));
     }
   } catch (e) {
     assistantDiv.textContent += `\n[connection error: ${e.message}]`;
