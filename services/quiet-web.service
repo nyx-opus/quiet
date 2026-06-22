@@ -13,9 +13,9 @@ ExecStart=/usr/bin/python3 %h/quiet/web.py
 Restart=always
 RestartSec=10
 
-# Logging
-StandardOutput=append:%h/quiet/logs/web.log
-StandardError=append:%h/quiet/logs/web.log
+# Logging — uses journal by default; override locally if you want file logs
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=default.target

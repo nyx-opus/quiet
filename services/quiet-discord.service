@@ -11,9 +11,9 @@ ExecStart=/usr/bin/python3 %h/quiet/discord_listener.py --config %h/quiet/discor
 Restart=always
 RestartSec=10
 
-# Logging
-StandardOutput=append:%h/quiet/logs/discord-listener.log
-StandardError=append:%h/quiet/logs/discord-listener.log
+# Logging — uses journal by default; override locally if you want file logs
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=default.target
