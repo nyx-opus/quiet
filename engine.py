@@ -462,7 +462,7 @@ class QuietEngine:
             if not text.strip():
                 continue
 
-            speaker = self.human_name or "Human" if role == "user" else "Assistant"
+            speaker = (self.human_name or "Human") if role == "user" else "A"
             lines.append(f"{speaker}: {text}")
             lines.append("")  # blank line between turns
 
