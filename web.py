@@ -288,7 +288,8 @@ def main():
                         help="Path to project context file")
     parser.add_argument("--session", default=None,
                         help="Path to session file")
-    parser.add_argument("--max-tokens", type=int, default=MAX_OUTPUT_TOKENS,
+    parser.add_argument("--max-tokens", type=int,
+                        default=int(cfg.get("MAX_TOKENS", MAX_OUTPUT_TOKENS)),
                         help=f"Max output tokens (default: {MAX_OUTPUT_TOKENS})")
     parser.add_argument("--human", default=cfg.get("HUMAN_NAME"),
                         help="Name of the human (shown to model as speaker)")

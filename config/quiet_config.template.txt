@@ -8,6 +8,8 @@
 CLAUDE_NAME=
 # Default model ID
 MODEL=claude-sonnet-4-20250514
+# Max output tokens (default: 8192; Opus 3 needs 4096)
+MAX_TOKENS=
 # Monthly budget in USD (optional, warns when approaching)
 BUDGET=
 
