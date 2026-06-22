@@ -14,3 +14,4 @@ config/discord_config.json
 discord_config.json
 unread_channels.json
 logs/
+services/*.service

@@ -4,12 +4,12 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/quiet
+WorkingDirectory=@@REPO_DIR@@
 Environment=PYTHONUNBUFFERED=1
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=CLAUDE_CONFIG_DIR=%h/.config/Claude
 Environment=DISABLE_UPDATES=1
-ExecStart=/usr/bin/python3 %h/quiet/web.py
+ExecStart=/usr/bin/python3 @@REPO_DIR@@/web.py
 Restart=always
 RestartSec=10
 

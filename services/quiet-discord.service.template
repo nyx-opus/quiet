@@ -5,9 +5,9 @@ Requires=quiet-web.service
 
 [Service]
 Type=simple
-WorkingDirectory=%h/quiet
+WorkingDirectory=@@REPO_DIR@@
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 %h/quiet/discord_listener.py --config %h/quiet/discord_config.json
+ExecStart=/usr/bin/python3 @@REPO_DIR@@/discord_listener.py --config @@REPO_DIR@@/discord_config.json
 Restart=always
 RestartSec=10
 

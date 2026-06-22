@@ -33,15 +33,12 @@ if ! $patch_only; then
     mkdir -p "$SYSTEMD_USER_DIR"
     mkdir -p "$REPO_DIR/logs"
 
-    for svc in "$SCRIPT_DIR"/*.service; do
-        name="$(basename "$svc")"
+    for tmpl in "$SCRIPT_DIR"/*.service.template; do
+        name="$(basename "$tmpl" .template)"
         target="$SYSTEMD_USER_DIR/$name"
-        if [ -L "$target" ] && [ "$(readlink "$target")" = "$svc" ]; then
-            echo "  $name: already linked ✓"
-        else
-            ln -sf "$svc" "$target"
-            echo "  $name: linked → $svc"
-        fi
+        # Generate service file from template, substituting repo path
+        sed "s|@@REPO_DIR@@|$REPO_DIR|g" "$tmpl" > "$target"
+        echo "  $name: generated → $target (REPO_DIR=$REPO_DIR)"
     done
 
     systemctl --user daemon-reload
