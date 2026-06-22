@@ -16,3 +16,4 @@ discord_config.json
 unread_channels.json
 logs/
 services/*.service
+static/custom.css
