@@ -920,6 +920,20 @@ class QuietEngine:
                           f"chars)", file=_sys2.stderr, flush=True)
                     full_text = stripped
 
+        # Strip engine control strings that leaked into output.
+        # The model sometimes echoes the delimiters it sees in the history
+        # formatting, which can confuse the engine on the next turn.
+        for ctrl in [
+            "[Conversation continues below]",
+            "[Previous conversation — continuing from here]",
+        ]:
+            if ctrl in full_text:
+                import sys as _sys3
+                idx = full_text.index(ctrl)
+                print(f"[ccode] stripped leaked delimiter '{ctrl}' at char {idx}",
+                      file=_sys3.stderr, flush=True)
+                full_text = full_text[:idx].rstrip()
+
         # Record assistant response for session persistence
         self.messages.append({"role": "assistant", "content": full_text})
 
