@@ -900,6 +900,26 @@ class QuietEngine:
             # Don't use raw stdout (it's JSON), but flag the problem
             full_text = "[response received but could not be parsed — check service logs]"
 
+        # Guard: strip fabricated continuation.
+        # When the model is in flow, it can keep generating past its turn,
+        # producing "Amy: ..." / "A: ..." pairs that look like real conversation.
+        # Truncate at the first line that starts with the human speaker name.
+        if full_text and self.human_name:
+            import re
+            pattern = re.compile(
+                r'\n' + re.escape(self.human_name) + r':\s',
+                re.MULTILINE
+            )
+            match = pattern.search(full_text)
+            if match:
+                stripped = full_text[:match.start()].rstrip()
+                if stripped:
+                    import sys as _sys2
+                    print(f"[ccode] stripped fabricated continuation at char "
+                          f"{match.start()} (removed {len(full_text) - match.start()} "
+                          f"chars)", file=_sys2.stderr, flush=True)
+                    full_text = stripped
+
         # Record assistant response for session persistence
         self.messages.append({"role": "assistant", "content": full_text})
 
