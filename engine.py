@@ -923,16 +923,24 @@ class QuietEngine:
         # Strip engine control strings that leaked into output.
         # The model sometimes echoes the delimiters it sees in the history
         # formatting, which can confuse the engine on the next turn.
+        # Only match when the delimiter appears on its own line (possibly
+        # preceded by whitespace), NOT when it's quoted inside prose or
+        # code blocks — otherwise mentioning the delimiter truncates the
+        # response (which is exactly what was happening).
+        import re as _re
         for ctrl in [
             "[Conversation continues below]",
             "[Previous conversation — continuing from here]",
         ]:
-            if ctrl in full_text:
+            # Match only at start-of-string or start-of-line, with optional
+            # leading whitespace, as a standalone line.
+            pattern = _re.compile(r'(?:^|\n)\s*' + _re.escape(ctrl) + r'\s*(?:\n|$)')
+            m = pattern.search(full_text)
+            if m:
                 import sys as _sys3
-                idx = full_text.index(ctrl)
-                print(f"[ccode] stripped leaked delimiter '{ctrl}' at char {idx}",
+                print(f"[ccode] stripped leaked delimiter '{ctrl}' at char {m.start()}",
                       file=_sys3.stderr, flush=True)
-                full_text = full_text[:idx].rstrip()
+                full_text = full_text[:m.start()].rstrip()
 
         # Record assistant response for session persistence
         self.messages.append({"role": "assistant", "content": full_text})
