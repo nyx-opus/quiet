@@ -76,6 +76,12 @@ class QuietDiscordBot(discord.Client):
                         Path(__file__).parent / "inbox"))
         self.inbox_dir.mkdir(parents=True, exist_ok=True)
 
+        # Group channel batching state: channel_id -> list of pending messages
+        # Each entry: {"sender": str, "content": str, "message": discord.Message}
+        self.group_buffers = {}
+        # Track unique senders per batch (excluding self)
+        self.group_senders = {}
+
     async def on_ready(self):
         # Resolve channel names from Discord
         for guild in self.guilds:
@@ -141,7 +147,9 @@ class QuietDiscordBot(discord.Client):
 
         # Determine mode: DMs and mentions are always direct.
         # Channels can be configured as "direct" (sibling channels,
-        # treated like DMs) or "ambient" (notify only, default).
+        # treated like DMs), "group" (batched delivery after n-1
+        # messages, where n = unique participants in the batch), or
+        # "ambient" (transcript only, default).
         if is_dm or is_mention:
             mode = "direct"
         else:
@@ -153,6 +161,8 @@ class QuietDiscordBot(discord.Client):
 
         if mode == "direct":
             await self.handle_direct(message, sender, content, channel_name)
+        elif mode == "group":
+            await self.handle_group(message, sender, content, channel_name)
         else:
             await self.handle_ambient(sender, content, channel_name)
 
@@ -182,6 +192,76 @@ class QuietDiscordBot(discord.Client):
                     chunk = response_text[i:i + 1900]
                     await message.channel.send(chunk)
                 # Also transcript the response
+                self.append_transcript(channel_name, "self", response_text)
+                print(f"  → responded ({len(response_text)} chars)")
+        except Exception as e:
+            print(f"  → error: {e}", file=sys.stderr)
+
+    async def handle_group(self, message, sender, content, channel_name):
+        """Handle group channel message — batch and deliver after n-1 messages.
+
+        Messages accumulate in a buffer. Once the number of messages from
+        *other* participants reaches (unique_senders - 1), the whole batch
+        is delivered as one combined message to the Quiet session. This
+        naturally creates round-robin pacing: in a 4-person channel, each
+        participant waits for 3 others to speak before getting the batch.
+
+        The count is based on unique senders in the current batch, not
+        total channel members. So if only 2 people are talking in a
+        10-person channel, it triggers after 1 message (2 - 1 = 1).
+        """
+        channel_id = str(message.channel.id)
+
+        # Initialise buffer for this channel if needed
+        if channel_id not in self.group_buffers:
+            self.group_buffers[channel_id] = []
+            self.group_senders[channel_id] = set()
+
+        # Add message to buffer
+        self.group_buffers[channel_id].append({
+            "sender": sender,
+            "content": content,
+            "message": message,
+        })
+        self.group_senders[channel_id].add(sender)
+
+        n_senders = len(self.group_senders[channel_id])
+        n_messages = len(self.group_buffers[channel_id])
+        threshold = max(n_senders - 1, 1)  # at least 1 message before delivery
+
+        print(f"[group] #{channel_name} {sender}: {content[:80]}"
+              f"  ({n_messages}/{threshold} msgs, {n_senders} participants)")
+
+        if n_messages >= threshold:
+            await self._deliver_group_batch(channel_id, channel_name)
+
+    async def _deliver_group_batch(self, channel_id, channel_name):
+        """Format and deliver the accumulated group batch to Quiet."""
+        buffer = self.group_buffers.pop(channel_id, [])
+        self.group_senders.pop(channel_id, None)
+
+        if not buffer:
+            return
+
+        # Format the batch as a single tagged message
+        lines = [f"[discord · #{channel_name} — group batch, "
+                 f"{len(buffer)} messages]"]
+        for entry in buffer:
+            lines.append(f"  {entry['sender']}: {entry['content']}")
+
+        tagged = "\n".join(lines)
+        print(f"[group] delivering batch for #{channel_name}: "
+              f"{len(buffer)} messages")
+
+        # Use the last message's channel for the response
+        reply_channel = buffer[-1]["message"].channel
+
+        try:
+            response_text = await self.send_to_quiet(tagged)
+            if response_text:
+                for i in range(0, len(response_text), 1900):
+                    chunk = response_text[i:i + 1900]
+                    await reply_channel.send(chunk)
                 self.append_transcript(channel_name, "self", response_text)
                 print(f"  → responded ({len(response_text)} chars)")
         except Exception as e:
