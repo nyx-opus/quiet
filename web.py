@@ -336,6 +336,8 @@ def main():
 
     session_path = Path(args.session) if args.session else None
 
+    separator = cfg.get("SEPARATOR", "· · ·")
+
     engine = QuietEngine(
         client=client,
         model=args.model,
@@ -345,6 +347,7 @@ def main():
         max_tokens=args.max_tokens,
         session_path=session_path,
         backend="ccode" if use_ccode else "sdk",
+        separator=separator,
     )
 
     identity_label = args.identity or "default"

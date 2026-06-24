@@ -337,13 +337,15 @@ class QuietEngine:
                  coop_url: str = None,
                  system_prefix: str = None,
                  ambient_images: list = None,
-                 backend: str = "sdk"):
+                 backend: str = "sdk",
+                 separator: str = "· · ·"):
         self.backend = backend
         self.client = client
         self.model = model
         self.max_tokens = max_tokens
         self.identity_name = identity
         self.human_name = human_name
+        self.separator = separator
         self.messages = []
 
         # Backend-specific setup
@@ -443,7 +445,7 @@ class QuietEngine:
         (e.g. from a visit.sh handoff). These need to be included in the
         first ccode call since ccode's own session is fresh.
         """
-        lines = ["☾☾☾\n"]
+        lines = [f"{self.separator}\n"]
         for msg in messages:
             role = msg["role"]
             content = msg.get("content", "")
@@ -466,7 +468,7 @@ class QuietEngine:
             lines.append(f"{speaker}: {text}")
             lines.append("")  # blank line between turns
 
-        lines.append("☾☾☾\n")
+        lines.append(f"{self.separator}\n")
         return "\n".join(lines)
 
     @property
@@ -921,10 +923,11 @@ class QuietEngine:
                     full_text = stripped
 
         # Strip section separator if echoed into output.
-        # The history uses ☾☾☾ as a semantically empty separator;
-        # if the model reproduces it, trim from that point.
+        # The history uses a configurable separator between context and
+        # new message; if the model reproduces it, trim from that point.
         import re as _re
-        pattern = _re.compile(r'(?:^|\n)\s*☾☾☾\s*(?:\n|$)')
+        sep_escaped = _re.escape(self.separator)
+        pattern = _re.compile(r'(?:^|\n)\s*' + sep_escaped + r'\s*(?:\n|$)')
         m = pattern.search(full_text)
         if m:
             import sys as _sys3
