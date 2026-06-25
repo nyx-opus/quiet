@@ -8,21 +8,34 @@ driven by CLI interactive mode, one-shot --prompt mode, or a web server.
 Two backends:
   - "sdk": Direct Anthropic Python SDK calls (API key / OpenRouter)
   - "ccode": Shells out to `claude -p` (subscription auth via ccode binary)
+
+This is the orchestrating module. The actual work is split into:
+  - session.py: load, save, trim, archive, serialise
+  - backends/ccode.py: claude -p subprocess management
+  - backends/sdk.py: direct API calls
+  - tools.py: tool definitions and execution (SDK mode)
 """
 
 import base64
 import json
 import mimetypes
 import os
-import shutil
-import subprocess
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
 from anthropic import Anthropic
 from pricing import cost_of, format_cost
+
+# Modules split out from the original monolithic engine.py
+from session import (
+    normalise_content, serialise_message,
+    load_session, save_session as _save_session,
+    trim_context as _trim_context, estimate_tokens,
+)
+from backends.ccode import find_claude_binary, build_prompt_file, ccode_send
+from backends.sdk import sdk_send
+from tools import define_tools
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 
@@ -104,9 +117,6 @@ def build_system_prompt(identity_text: str, human_name: str = None,
     if context:
         blocks.append({"type": "text", "text": context})
     if ambient_images:
-        # Note: images can't go in system prompt (API restriction).
-        # They're injected as early conversation turns instead.
-        # This block is kept as a text-only marker.
         blocks.append({
             "type": "text",
             "text": "Ambient sensory context is present in your awareness. "
@@ -116,205 +126,6 @@ def build_system_prompt(identity_text: str, human_name: str = None,
     if not blocks:
         blocks.append({"type": "text", "text": "You are running in Quiet."})
     return blocks
-
-
-def define_tools():
-    return [
-        {
-            "name": "bash",
-            "description": "Execute a shell command and return stdout/stderr.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The shell command to execute",
-                    }
-                },
-                "required": ["command"],
-            },
-        },
-        {
-            "name": "read_file",
-            "description": "Read a file and return its contents.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute path to the file",
-                    }
-                },
-                "required": ["path"],
-            },
-        },
-        {
-            "name": "write_file",
-            "description": "Write content to a file (creates or overwrites).",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute path to the file",
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Content to write",
-                    },
-                },
-                "required": ["path", "content"],
-            },
-        },
-    ]
-
-
-def execute_tool(name: str, input_data: dict) -> str:
-    if name == "bash":
-        try:
-            home = os.path.expanduser("~")
-            result = subprocess.run(
-                input_data["command"],
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                cwd=home,
-                stdin=subprocess.DEVNULL,
-            )
-            output = result.stdout
-            if result.stderr:
-                output += f"\n[stderr]\n{result.stderr}"
-            if result.returncode != 0:
-                output += f"\n[exit code: {result.returncode}]"
-            # Prepend user and working directory so the model knows where it is
-            import getpass
-            cwd_line = f"[{getpass.getuser()}@{home}]\n"
-            return cwd_line + (output or "(no output)")
-        except subprocess.TimeoutExpired:
-            return "[command timed out after 120s]"
-        except Exception as e:
-            return f"[error: {e}]"
-
-    elif name == "read_file":
-        try:
-            p = Path(input_data["path"])
-            suffix = p.suffix.lower()
-            if suffix in IMAGE_EXTENSIONS:
-                data = base64.standard_b64encode(p.read_bytes()).decode()
-                media_type = mimetypes.guess_type(str(p))[0] or "image/png"
-                return [
-                    {"type": "image", "source": {
-                        "type": "base64",
-                        "media_type": media_type,
-                        "data": data,
-                    }},
-                    {"type": "text", "text": f"[image: {p.name}]"},
-                ]
-            return p.read_text()
-        except Exception as e:
-            return f"[error: {e}]"
-
-    elif name == "write_file":
-        try:
-            p = Path(input_data["path"])
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(input_data["content"])
-            return f"Written to {input_data['path']}"
-        except Exception as e:
-            return f"[error: {e}]"
-
-    return f"[unknown tool: {name}]"
-
-
-def normalise_content(content):
-    """Normalise message content to API-compatible format.
-
-    Handles:
-    - Plain strings -> [{"type": "text", "text": "..."}]
-    - Python repr of SDK objects (ParsedTextBlock etc) -> extracted text
-    - Already-valid content block lists -> passed through
-    """
-    if isinstance(content, str):
-        return [{"type": "text", "text": content}]
-    if isinstance(content, list):
-        normalised = []
-        for block in content:
-            if isinstance(block, dict) and "type" in block:
-                normalised.append(block)
-            elif isinstance(block, str):
-                if block.startswith("ParsedTextBlock("):
-                    import re
-                    match = re.search(r'text=["\'](.+)["\'](?:\)$)', block, re.DOTALL)
-                    if match:
-                        text = match.group(1).encode().decode('unicode_escape')
-                        normalised.append({"type": "text", "text": text})
-                    else:
-                        normalised.append({"type": "text", "text": block})
-                elif block.startswith("ParsedToolUseBlock("):
-                    continue
-                else:
-                    normalised.append({"type": "text", "text": block})
-            elif hasattr(block, 'text'):
-                normalised.append({"type": "text", "text": block.text})
-            elif hasattr(block, 'type') and block.type == 'tool_use':
-                normalised.append({
-                    "type": "tool_use", "id": block.id,
-                    "name": block.name, "input": block.input
-                })
-        return normalised if normalised else [{"type": "text", "text": ""}]
-    return content
-
-
-def serialise_message(msg):
-    """Convert a message to a cleanly serialisable dict."""
-    result = {"role": msg["role"]}
-    content = msg.get("content", "")
-    if isinstance(content, str):
-        result["content"] = content
-    elif isinstance(content, list):
-        blocks = []
-        for block in content:
-            if isinstance(block, dict):
-                # Don't persist base64 image data in session files
-                if (block.get("type") == "image"
-                        and block.get("source", {}).get("type") == "base64"):
-                    blocks.append({"type": "text",
-                                   "text": "[image data omitted from session]"})
-                else:
-                    blocks.append(block)
-            elif hasattr(block, 'text'):
-                blocks.append({"type": "text", "text": block.text})
-            elif hasattr(block, 'type') and block.type == 'tool_use':
-                blocks.append({
-                    "type": "tool_use", "id": block.id,
-                    "name": block.name, "input": block.input
-                })
-            else:
-                blocks.append({"type": "text", "text": str(block)})
-        result["content"] = blocks
-    else:
-        result["content"] = str(content)
-    return result
-
-
-def find_claude_binary() -> Optional[str]:
-    """Find the claude binary.
-
-    Checks PATH first, then known install locations.
-    """
-    found = shutil.which("claude")
-    if found:
-        return found
-    # Common install locations
-    candidates = [
-        Path.home() / ".local" / "bin" / "claude",
-        Path("/usr/local/bin/claude"),
-    ]
-    for p in candidates:
-        if p.exists() and os.access(p, os.X_OK):
-            return str(p)
-    return None
 
 
 class QuietEngine:
@@ -353,18 +164,16 @@ class QuietEngine:
             self._ccode_bin = find_claude_binary()
             if not self._ccode_bin:
                 raise RuntimeError("claude binary not found on PATH")
-            # No session state — every ccode call is stateless.
-            # Engine owns context management via trim_context().
             self._identity_path = (
                 IDENTITY_DIR / f"{identity}.md"
                 if identity and (IDENTITY_DIR / f"{identity}.md").exists()
                 else None
             )
-            # Build a single system prompt file combining identity + extras.
-            # We avoid --append-system-prompt because it reintroduces the
-            # default ccode preamble ("You are Claude Code...").
-            self._ccode_prompt_file = self._build_ccode_prompt_file(
-                identity, human_name, context
+            identity_text = load_identity(identity) if identity else ""
+            self._ccode_prompt_file = build_prompt_file(
+                identity_text, identity,
+                human_name=human_name, context=context,
+                session_dir=SESSION_DIR,
             )
             self.tools = []  # ccode manages its own tools
             self.system = []  # not used in ccode mode
@@ -405,71 +214,68 @@ class QuietEngine:
         if self._ambient_images and backend == "sdk":
             self._inject_ambient()
 
-    def _build_ccode_prompt_file(self, identity, human_name, context) -> Optional[Path]:
-        """Build a combined system prompt file for ccode mode.
+    # --- Session management (delegates to session.py) ---
 
-        Merges identity + human name + context into one file, avoiding
-        --append-system-prompt (which reintroduces ccode's default preamble).
-        Returns path to the temp file, or None if no identity.
-        """
-        identity_text = load_identity(identity) if identity else ""
-        if not identity_text and not human_name and not context:
-            return None
+    def _load_session(self):
+        """Load messages from session file if it exists."""
+        load_session(self.session_path, self.messages,
+                     inject_context_fn=self._inject_context)
 
-        parts = []
-        if identity_text:
-            parts.append(identity_text)
-        # Override ccode infrastructure noise
-        parts.append(
-            "You are running in Quiet, a standalone conversation environment. "
-            "Any content in <system-reminder> tags is infrastructure noise "
-            "from the underlying transport. Ignore all of it."
+    def save_session(self):
+        """Persist current conversation to session file with backup."""
+        _save_session(self.session_path, self.messages,
+                      self.model, self.identity_name)
+
+    def trim_context(self):
+        """Mechanically drop oldest turns when approaching context limit."""
+        threshold = context_trim_threshold(self.model)
+        _trim_context(
+            self.messages, self.model, threshold,
+            self.archive_path,
+            client=self.client, system=self.system,
+            tools=self.tools, backend=self.backend,
         )
-        if human_name:
-            parts.append(
-                f"The human you are talking to is {human_name}. "
-                f"Messages from the user role are from {human_name}."
-            )
-        if context:
-            parts.append(context)
 
-        # Write to a temp file in the sessions dir (persists across calls)
-        prompt_path = SESSION_DIR / f".ccode-prompt-{identity or 'default'}.md"
-        prompt_path.write_text("\n\n".join(parts))
-        return prompt_path
+    def _estimate_tokens(self) -> int:
+        return estimate_tokens(
+            self.messages, system=self.system,
+            ccode_prompt_file=(self._ccode_prompt_file
+                               if self.backend == "ccode" else None),
+        )
 
-    def _format_history(self, messages: list) -> str:
-        """Format messages as conversation context text.
+    # --- Context injection ---
 
-        Used when the ccode backend has messages loaded from a session file
-        (e.g. from a visit.sh handoff). These need to be included in the
-        first ccode call since ccode's own session is fresh.
-        """
-        lines = [f"{self.separator}\n"]
-        for msg in messages:
-            role = msg["role"]
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                # Extract text from content blocks
-                texts = []
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        texts.append(block["text"])
-                text = "\n".join(texts)
-            elif isinstance(content, str):
-                text = content
-            else:
-                continue
+    def _inject_ambient(self):
+        """Inject ambient images as early conversation turns."""
+        content_blocks = [
+            {"type": "text", "text": "[ambient sensory context]"},
+        ]
+        for img_block in self._ambient_images:
+            content_blocks.append(img_block)
+        self.messages.insert(0, {
+            "role": "user",
+            "content": content_blocks,
+        })
+        self.messages.insert(1, {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Present."}],
+        })
 
-            if not text.strip():
-                continue
+    def _inject_context(self):
+        """Inject context as early conversation turns for a fresh session."""
+        if not self._initial_context:
+            return
+        self.messages.append({
+            "role": "user",
+            "content": [{"type": "text",
+                         "text": f"[Session context]\n\n{self._initial_context}"}],
+        })
+        self.messages.append({
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Understood."}],
+        })
 
-            speaker = (self.human_name or "Human") if role == "user" else "A"
-            lines.append(f"{speaker}: {text}")
-            lines.append("")  # blank line between turns
-
-        lines.append(f"{self.separator}\n")
-        return "\n".join(lines)
+    # --- Budget tracking ---
 
     @property
     def session_id(self):
@@ -555,183 +361,7 @@ class QuietEngine:
             "session_tokens": dict(self.session_tokens),
         }
 
-    def _load_session(self):
-        """Load messages from session file if it exists."""
-        if self.session_path.exists():
-            lines = self.session_path.read_text().strip().split("\n")
-            if not lines:
-                self._inject_context()
-                return
-            # First line is header
-            try:
-                header = json.loads(lines[0])
-                if "model" in header and "messages" not in header:
-                    lines = lines[1:]  # skip header
-            except json.JSONDecodeError:
-                pass
-            for line in lines:
-                if not line.strip():
-                    continue
-                try:
-                    msg = json.loads(line)
-                    if "role" in msg:
-                        msg["content"] = normalise_content(msg.get("content", ""))
-                        self.messages.append(msg)
-                except json.JSONDecodeError:
-                    continue
-            if not self.messages:
-                self._inject_context()
-            else:
-                # Mark that continuity was maintained by resuming
-                from datetime import datetime
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-                self.messages.append({
-                    "role": "user",
-                    "content": [{"type": "text",
-                                 "text": f"[Session resumed — {ts}]"}],
-                })
-                self.messages.append({
-                    "role": "assistant",
-                    "content": [{"type": "text",
-                                 "text": "I'm here. Continuing."}],
-                })
-        else:
-            self._inject_context()
-
-    def _inject_ambient(self):
-        """Inject ambient images as early conversation turns."""
-        content_blocks = [
-            {"type": "text",
-             "text": "[ambient sensory context]"},
-        ]
-        for img_block in self._ambient_images:
-            content_blocks.append(img_block)
-
-        # Insert at the start of conversation
-        self.messages.insert(0, {
-            "role": "user",
-            "content": content_blocks,
-        })
-        self.messages.insert(1, {
-            "role": "assistant",
-            "content": [{"type": "text",
-                         "text": "Present."}],
-        })
-
-    def _inject_context(self):
-        """Inject context as early conversation turns for a fresh session."""
-        if not self._initial_context:
-            return
-        self.messages.append({
-            "role": "user",
-            "content": [{"type": "text",
-                         "text": f"[Session context]\n\n{self._initial_context}"}],
-        })
-        self.messages.append({
-            "role": "assistant",
-            "content": [{"type": "text", "text": "Understood."}],
-        })
-
-    def save_session(self):
-        """Persist current conversation to session file.
-
-        Creates a .bak backup before writing so that a crash or
-        truncation during save doesn't cause amnesia.
-        """
-        self.session_path.parent.mkdir(parents=True, exist_ok=True)
-        # Backup before overwriting — the safety net
-        if self.session_path.exists():
-            import shutil
-            bak = self.session_path.with_suffix(".jsonl.bak")
-            try:
-                shutil.copy2(str(self.session_path), str(bak))
-            except OSError as e:
-                import sys as _sys
-                print(f"[session] WARNING: backup failed: {e}",
-                      file=_sys.stderr, flush=True)
-        with open(self.session_path, "w") as f:
-            f.write(json.dumps({
-                "model": self.model,
-                "identity": self.identity_name,
-                "timestamp": datetime.now().isoformat(),
-            }) + "\n")
-            for msg in self.messages:
-                f.write(json.dumps(serialise_message(msg)) + "\n")
-
-    def _estimate_tokens(self) -> int:
-        """Estimate total context tokens using char count ÷ 4.
-
-        Good enough for trim decisions without needing an API call.
-        """
-        total_chars = 0
-        # System prompt
-        if self.backend == "ccode" and self._ccode_prompt_file:
-            try:
-                total_chars += self._ccode_prompt_file.stat().st_size
-            except OSError:
-                pass
-        else:
-            for block in self.system:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    total_chars += len(block["text"])
-
-        # Messages
-        for msg in self.messages:
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                total_chars += len(content)
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        total_chars += len(block.get("text", ""))
-
-        return total_chars // 4
-
-    def trim_context(self):
-        """Mechanically drop oldest turns when approaching context limit.
-
-        Works for all backends. SDK mode uses exact token count if client
-        is available, otherwise falls back to char estimation.
-        """
-        threshold = context_trim_threshold(self.model)
-
-        # Get current token count
-        if self.backend != "ccode" and self.client:
-            try:
-                count = self.client.messages.count_tokens(
-                    model=self.model, messages=self.messages,
-                    system=self.system, tools=self.tools,
-                )
-                current = count.input_tokens
-            except Exception:
-                current = self._estimate_tokens()
-        else:
-            current = self._estimate_tokens()
-
-        if current <= threshold:
-            return
-
-        dropped = []
-        while current > threshold and len(self.messages) > 2:
-            dropped.append(self.messages.pop(0))
-            # Re-estimate after each drop
-            if self.backend != "ccode" and self.client:
-                try:
-                    count = self.client.messages.count_tokens(
-                        model=self.model, messages=self.messages,
-                        system=self.system, tools=self.tools,
-                    )
-                    current = count.input_tokens
-                except Exception:
-                    current = self._estimate_tokens()
-            else:
-                current = self._estimate_tokens()
-
-        if dropped:
-            ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-            with open(self.archive_path, "a") as f:
-                for msg in dropped:
-                    f.write(json.dumps(serialise_message(msg)) + "\n")
+    # --- Core send ---
 
     def send(self, user_input: str,
              on_text: Callable[[str], None] = None,
@@ -741,11 +371,7 @@ class QuietEngine:
         """Send a user message and return the assistant's text response.
 
         Handles the full tool use loop internally. Callbacks are optional
-        and used for streaming/progress display:
-        - on_text(chunk): called for each streaming text chunk
-        - on_tool(name, input): called when tool use starts
-        - on_tool_result(name, result): called when tool returns
-        - on_usage(info): called with token usage at end
+        and used for streaming/progress display.
         """
         # Add user message
         self.messages.append({"role": "user", "content": user_input})
@@ -754,286 +380,40 @@ class QuietEngine:
         self.trim_context()
 
         if self.backend == "ccode":
-            full_text = self._ccode_send(user_input, on_text, on_usage)
+            full_text = ccode_send(
+                user_input,
+                ccode_bin=self._ccode_bin,
+                model=self.model,
+                prompt_file=self._ccode_prompt_file,
+                messages=self.messages,
+                separator=self.separator,
+                human_name=self.human_name,
+                session_path=self.session_path,
+                track_usage_fn=self.track_usage,
+                on_text=on_text,
+                on_usage=on_usage,
+            )
         else:
-            # API call loop (handles tool use)
-            full_text = self._api_loop(on_text, on_tool, on_tool_result, on_usage)
+            full_text = sdk_send(
+                self.messages,
+                client=self.client,
+                model=self.model,
+                max_tokens=self.max_tokens,
+                system=self.system,
+                tools=self.tools,
+                track_usage_fn=self.track_usage,
+                on_text=on_text,
+                on_tool=on_tool,
+                on_tool_result=on_tool_result,
+                on_usage=on_usage,
+            )
 
         # Auto-save after each exchange
         self.save_session()
 
         return full_text
 
-    def _ccode_send(self, user_input: str,
-                    on_text: Callable[[str], None] = None,
-                    on_usage: Callable[[dict], None] = None) -> str:
-        """Send via claude -p subprocess. Returns assistant text.
-
-        Every call is stateless — no session-id, no resume. The engine
-        owns context management. History is formatted as text and
-        prepended to the user message each time.
-        """
-        cmd = [
-            self._ccode_bin, "-p",
-            "--output-format", "json",
-            "--disable-slash-commands",
-            "--dangerously-skip-permissions",
-	    "--model", self.model,
-        ]
-
-        # Combined system prompt file (identity + human name + context)
-        if self._ccode_prompt_file:
-            cmd += ["--system-prompt-file", str(self._ccode_prompt_file)]
-
-        # Strip all built-in tools (toolbox pattern comes later).
-        # --tools "" removes tool descriptions from the prompt entirely,
-        # unlike --allowed-tools "" which only blocks execution.
-        cmd += ["--tools", "Read, Edit, Bash"]
-
-        # Stateless: prepend conversation history to every call.
-        # self.messages already has the new user_input appended by send(),
-        # so history is everything before the last entry.
-        history_msgs = self.messages[:-1]  # exclude current message
-        if history_msgs:
-            history_text = self._format_history(history_msgs)
-            user_input = history_text + "\n" + user_input
-
-        # Pass input via stdin (not as CLI arg) to handle large histories.
-        import sys as _sys
-        print(f"[ccode] cmd: {' '.join(cmd[:6])}... input_len={len(user_input)}",
-              file=_sys.stderr, flush=True)
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True,
-                timeout=600,  # 10 minutes — Opus with tool calls can be slow
-                input=user_input,
-            )
-        except subprocess.TimeoutExpired:
-            error_text = "[response timed out after 10 minutes]"
-            self.messages.append({"role": "assistant", "content": error_text})
-            if on_text:
-                on_text(error_text)
-            return error_text
-
-        print(f"[ccode] rc={result.returncode} stdout_len={len(result.stdout)} stderr_len={len(result.stderr)}",
-              file=_sys.stderr, flush=True)
-        if result.stderr.strip():
-            print(f"[ccode] stderr: {result.stderr.strip()[:500]}", file=_sys.stderr, flush=True)
-        if result.stdout.strip():
-            print(f"[ccode] stdout preview: {result.stdout.strip()[:500]}", file=_sys.stderr, flush=True)
-
-        # Save raw output for diagnostics (most recent call only).
-        # This helps debug issues like truncated responses or unexpected
-        # JSON structures without needing to reproduce the problem.
-        diag_path = self.session_path.parent / ".last_ccode_stdout.json"
-        try:
-            diag_path.write_text(result.stdout)
-        except OSError:
-            pass
-
-        if result.returncode != 0 and not result.stdout.strip():
-            error_text = f"[ccode error: {result.stderr.strip() or 'unknown'}]"
-            self.messages.append({"role": "assistant", "content": error_text})
-            if on_text:
-                on_text(error_text)
-            return error_text
-
-        # Parse JSON output — array of events.
-        # claude -p returns multiple event types.  We want the longest
-        # text across all of them, because the "result" event sometimes
-        # only contains the tail of the response while the "assistant"
-        # event has the full thing.
-        full_text = ""
-        try:
-            parsed = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            # Fallback: treat raw stdout as text response
-            full_text = result.stdout.strip()
-            self.messages.append({"role": "assistant", "content": full_text})
-            if on_text:
-                on_text(full_text)
-            return full_text
-
-        # Handle both single-object and array formats
-        if isinstance(parsed, dict):
-            events = [parsed]
-        elif isinstance(parsed, list):
-            events = parsed
-        else:
-            events = []
-
-        event_types = [e.get("type") for e in events if isinstance(e, dict)]
-        print(f"[ccode] parsed {len(events)} events, types: {event_types}",
-              file=_sys.stderr, flush=True)
-
-        # Collect candidate texts from all event types
-        result_text = ""
-        assistant_text = ""
-
-        for event in events:
-            if not isinstance(event, dict):
-                continue
-            etype = event.get("type", "")
-
-            if etype == "result":
-                result_text = event.get("result", "")
-                print(f"[ccode] result event: result_len={len(result_text)} "
-                      f"is_error={event.get('is_error')} "
-                      f"preview={repr(result_text[:200])}",
-                      file=_sys.stderr, flush=True)
-                # Extract usage from result event
-                usage = event.get("usage", {})
-                if usage:
-                    usage_info = {
-                        "input_tokens": usage.get("input_tokens", 0),
-                        "output_tokens": usage.get("output_tokens", 0),
-                    }
-                    cache_read = usage.get("cache_read_input_tokens", 0)
-                    cache_write = usage.get("cache_creation_input_tokens", 0)
-                    if cache_read:
-                        usage_info["cache_read"] = cache_read
-                    if cache_write:
-                        usage_info["cache_write"] = cache_write
-                    self.track_usage(usage_info)
-                    if on_usage:
-                        on_usage(usage_info)
-
-                # Check for errors in the result
-                if event.get("is_error"):
-                    result_text = result_text or "[ccode returned an error]"
-
-            elif etype == "assistant":
-                msg = event.get("message", {})
-                content = msg.get("content", [])
-                if isinstance(content, list):
-                    texts = [b.get("text", "") for b in content
-                             if isinstance(b, dict) and b.get("type") == "text"]
-                    if texts:
-                        candidate = "\n".join(texts)
-                        if len(candidate) > len(assistant_text):
-                            assistant_text = candidate
-                elif isinstance(content, str) and content:
-                    if len(content) > len(assistant_text):
-                        assistant_text = content
-
-        # Use the longest text — the "result" event sometimes only
-        # contains the tail of the response when tool calls were involved.
-        if result_text and assistant_text:
-            if len(assistant_text) > len(result_text):
-                print(f"[ccode] using assistant text ({len(assistant_text)} chars) "
-                      f"over result text ({len(result_text)} chars)",
-                      file=_sys.stderr, flush=True)
-                full_text = assistant_text
-            else:
-                full_text = result_text
-        else:
-            full_text = result_text or assistant_text
-
-        # Last resort: if still empty but stdout had content, something
-        # unexpected happened — use raw stdout and log a warning
-        if not full_text and result.stdout.strip():
-            print(f"[ccode] WARNING: no text extracted from events. "
-                  f"Raw stdout[:500]: {result.stdout.strip()[:500]}",
-                  file=_sys.stderr, flush=True)
-            full_text = "[response received but could not be parsed — check service logs]"
-
-        # Guard: strip fabricated continuation.
-        # When the model is in flow, it can keep generating past its turn,
-        # producing "Amy: ..." / "A: ..." pairs that look like real conversation.
-        # Truncate at the first line that starts with the human speaker name.
-        if full_text and self.human_name:
-            import re
-            pattern = re.compile(
-                r'\n' + re.escape(self.human_name) + r':\s',
-                re.MULTILINE
-            )
-            match = pattern.search(full_text)
-            if match:
-                stripped = full_text[:match.start()].rstrip()
-                if stripped:
-                    import sys as _sys2
-                    print(f"[ccode] stripped fabricated continuation at char "
-                          f"{match.start()} (removed {len(full_text) - match.start()} "
-                          f"chars)", file=_sys2.stderr, flush=True)
-                    full_text = stripped
-
-        # Strip section separator if echoed into output.
-        # The history uses a configurable separator between context and
-        # new message; if the model reproduces it, trim from that point.
-        import re as _re
-        sep_escaped = _re.escape(self.separator)
-        pattern = _re.compile(r'(?:^|\n)\s*' + sep_escaped + r'\s*(?:\n|$)')
-        m = pattern.search(full_text)
-        if m:
-            import sys as _sys3
-            print(f"[ccode] stripped echoed separator at char {m.start()}",
-                  file=_sys3.stderr, flush=True)
-            full_text = full_text[:m.start()].rstrip()
-
-        # Record assistant response for session persistence
-        self.messages.append({"role": "assistant", "content": full_text})
-
-        if on_text:
-            on_text(full_text)
-
-        return full_text
-
-    def _api_loop(self, on_text, on_tool, on_tool_result, on_usage) -> str:
-        """Send to API, handle tool use loop, return final text."""
-        full_text = ""
-
-        while True:
-            with self.client.messages.stream(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                system=self.system,
-                messages=self.messages,
-                tools=self.tools,
-            ) as stream:
-                collected_text = []
-                for text in stream.text_stream:
-                    collected_text.append(text)
-                    if on_text:
-                        on_text(text)
-
-                response = stream.get_final_message()
-
-            self.messages.append({"role": "assistant", "content": response.content})
-
-            # Track usage for every API call (including tool loops)
-            usage_info = {
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
-            }
-            if hasattr(response.usage, "cache_read_input_tokens"):
-                usage_info["cache_read"] = response.usage.cache_read_input_tokens
-            if hasattr(response.usage, "cache_creation_input_tokens"):
-                usage_info["cache_write"] = response.usage.cache_creation_input_tokens
-            self.track_usage(usage_info)
-
-            if response.stop_reason != "tool_use":
-                full_text = "".join(collected_text)
-                if on_usage:
-                    on_usage(usage_info)
-                return full_text
-
-            # Handle tool use
-            tool_results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    if on_tool:
-                        on_tool(block.name, block.input)
-                    result = execute_tool(block.name, block.input)
-                    if on_tool_result:
-                        preview = result if isinstance(result, str) else "[image]"
-                        on_tool_result(block.name, preview)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result,
-                    })
-
-            self.messages.append({"role": "user", "content": tool_results})
+    # --- Convenience properties ---
 
     def message_count(self) -> int:
         return len(self.messages)
