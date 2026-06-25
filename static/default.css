@@ -24,6 +24,7 @@ body {
   background: var(--bg);
   color: var(--text);
   height: 100vh;
+  height: 100dvh;  /* dynamic viewport — shrinks when mobile keyboard opens */
   display: flex;
   flex-direction: column;
 }
@@ -94,6 +95,7 @@ body {
 
 #input-area {
   padding: 16px 20px;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
   background: var(--surface);
   border-top: 1px solid var(--border);
   flex-shrink: 0;

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content">
 <title>Quiet</title>
 <link rel="stylesheet" href="/static/default.css">
 <link rel="stylesheet" href="/static/custom.css">
@@ -46,6 +46,20 @@ let streaming = false;
 inputEl.addEventListener('input', () => {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
+});
+
+// Mobile keyboard: keep input visible
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', () => {
+    // Scroll the input area into view when the keyboard changes the viewport
+    requestAnimationFrame(() => {
+      inputEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    });
+  });
+}
+inputEl.addEventListener('focus', () => {
+  // Small delay lets the keyboard finish opening before we scroll
+  setTimeout(() => inputEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), 300);
 });
 
 // Shift+Enter for newline, Enter to send
