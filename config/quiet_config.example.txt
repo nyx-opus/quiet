@@ -1,0 +1,23 @@
+# Quiet Configuration — Example
+# Copy to quiet_config.txt and edit for your instance.
+
+[IDENTITY]
+CLAUDE_NAME=your-name
+MODEL=claude-opus-4-6
+BUDGET=
+
+[NETWORK]
+COOP_URL=
+HOSTNAME=
+
+[AUTH]
+AUTH_MODE=auto
+HUMAN_NAME=
+
+[DISPLAY]
+SEPARATOR=· · ·
+
+[AUTONOMOUS]
+# Minutes between autonomous wakes. 0 = disabled.
+# Requires quiet-timer.timer to be enabled.
+AUTONOMOUS_INTERVAL=60

@@ -1,0 +1,14 @@
+[Unit]
+Description=Quiet autonomous wake
+After=quiet-web.service
+Requires=quiet-web.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=@@REPO_DIR@@
+ExecStart=/usr/bin/python3 @@REPO_DIR@@/autonomous.py
+StandardOutput=journal
+StandardError=journal
+
+# Give Opus time to think
+TimeoutStartSec=720

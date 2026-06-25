@@ -33,10 +33,10 @@ if ! $patch_only; then
     mkdir -p "$SYSTEMD_USER_DIR"
     mkdir -p "$REPO_DIR/logs"
 
-    for tmpl in "$SCRIPT_DIR"/*.service.template; do
+    for tmpl in "$SCRIPT_DIR"/*.template; do
         name="$(basename "$tmpl" .template)"
         target="$SYSTEMD_USER_DIR/$name"
-        # Generate service file from template, substituting repo path
+        # Generate unit file from template, substituting repo path
         sed "s|@@REPO_DIR@@|$REPO_DIR|g" "$tmpl" > "$target"
         echo "  $name: generated → $target (REPO_DIR=$REPO_DIR)"
     done
@@ -119,9 +119,13 @@ if ! $patch_only; then
     echo "  To enable and start services:"
     echo "    systemctl --user enable --now quiet-web"
     echo "    systemctl --user enable --now quiet-discord"
+    echo "    systemctl --user enable --now quiet-timer.timer   # autonomous wake"
     echo ""
     echo "  To restart after patching:"
     echo "    systemctl --user restart quiet-web quiet-discord"
+    echo ""
+    echo "  Configure autonomous wakes in config/quiet_config.txt:"
+    echo "    AUTONOMOUS_INTERVAL=60    # minutes between wakes (0=disabled)"
     echo ""
     echo "  Remember to create discord_config.json from discord_config_example.json"
     echo "  if you haven't already."

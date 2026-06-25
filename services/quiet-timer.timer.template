@@ -1,0 +1,14 @@
+[Unit]
+Description=Quiet autonomous wake timer
+After=quiet-web.service
+
+[Timer]
+# First wake 5 minutes after boot, then every 60 minutes.
+# To change interval, edit AUTONOMOUS_INTERVAL in config/quiet_config.txt
+# AND update OnUnitActiveSec here to match.
+OnActiveSec=5min
+OnUnitActiveSec=60min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
