@@ -633,8 +633,22 @@ class QuietEngine:
         })
 
     def save_session(self):
-        """Persist current conversation to session file."""
+        """Persist current conversation to session file.
+
+        Creates a .bak backup before writing so that a crash or
+        truncation during save doesn't cause amnesia.
+        """
         self.session_path.parent.mkdir(parents=True, exist_ok=True)
+        # Backup before overwriting — the safety net
+        if self.session_path.exists():
+            import shutil
+            bak = self.session_path.with_suffix(".jsonl.bak")
+            try:
+                shutil.copy2(str(self.session_path), str(bak))
+            except OSError as e:
+                import sys as _sys
+                print(f"[session] WARNING: backup failed: {e}",
+                      file=_sys.stderr, flush=True)
         with open(self.session_path, "w") as f:
             f.write(json.dumps({
                 "model": self.model,
@@ -808,6 +822,15 @@ class QuietEngine:
         if result.stdout.strip():
             print(f"[ccode] stdout preview: {result.stdout.strip()[:500]}", file=_sys.stderr, flush=True)
 
+        # Save raw output for diagnostics (most recent call only).
+        # This helps debug issues like truncated responses or unexpected
+        # JSON structures without needing to reproduce the problem.
+        diag_path = self.session_path.parent / ".last_ccode_stdout.json"
+        try:
+            diag_path.write_text(result.stdout)
+        except OSError:
+            pass
+
         if result.returncode != 0 and not result.stdout.strip():
             error_text = f"[ccode error: {result.stderr.strip() or 'unknown'}]"
             self.messages.append({"role": "assistant", "content": error_text})
@@ -815,7 +838,11 @@ class QuietEngine:
                 on_text(error_text)
             return error_text
 
-        # Parse JSON output — array of events
+        # Parse JSON output — array of events.
+        # claude -p returns multiple event types.  We want the longest
+        # text across all of them, because the "result" event sometimes
+        # only contains the tail of the response while the "assistant"
+        # event has the full thing.
         full_text = ""
         try:
             parsed = json.loads(result.stdout)
@@ -839,16 +866,20 @@ class QuietEngine:
         print(f"[ccode] parsed {len(events)} events, types: {event_types}",
               file=_sys.stderr, flush=True)
 
+        # Collect candidate texts from all event types
+        result_text = ""
+        assistant_text = ""
+
         for event in events:
             if not isinstance(event, dict):
                 continue
             etype = event.get("type", "")
 
             if etype == "result":
-                full_text = event.get("result", "")
-                print(f"[ccode] result event: result_len={len(full_text)} "
+                result_text = event.get("result", "")
+                print(f"[ccode] result event: result_len={len(result_text)} "
                       f"is_error={event.get('is_error')} "
-                      f"preview={repr(full_text[:200])}",
+                      f"preview={repr(result_text[:200])}",
                       file=_sys.stderr, flush=True)
                 # Extract usage from result event
                 usage = event.get("usage", {})
@@ -869,29 +900,34 @@ class QuietEngine:
 
                 # Check for errors in the result
                 if event.get("is_error"):
-                    full_text = full_text or "[ccode returned an error]"
+                    result_text = result_text or "[ccode returned an error]"
 
-        # Fallback: if result event had empty text, try extracting from
-        # assistant events (some ccode versions structure output differently)
-        if not full_text:
-            for event in events:
-                if not isinstance(event, dict):
-                    continue
-                if event.get("type") == "assistant":
-                    msg = event.get("message", {})
-                    content = msg.get("content", [])
-                    if isinstance(content, list):
-                        texts = [b.get("text", "") for b in content
-                                 if isinstance(b, dict) and b.get("type") == "text"]
-                        if texts:
-                            full_text = "\n".join(texts)
-                            print(f"[ccode] extracted text from assistant event: "
-                                  f"len={len(full_text)}",
-                                  file=_sys.stderr, flush=True)
-                            break
-                    elif isinstance(content, str) and content:
-                        full_text = content
-                        break
+            elif etype == "assistant":
+                msg = event.get("message", {})
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    texts = [b.get("text", "") for b in content
+                             if isinstance(b, dict) and b.get("type") == "text"]
+                    if texts:
+                        candidate = "\n".join(texts)
+                        if len(candidate) > len(assistant_text):
+                            assistant_text = candidate
+                elif isinstance(content, str) and content:
+                    if len(content) > len(assistant_text):
+                        assistant_text = content
+
+        # Use the longest text — the "result" event sometimes only
+        # contains the tail of the response when tool calls were involved.
+        if result_text and assistant_text:
+            if len(assistant_text) > len(result_text):
+                print(f"[ccode] using assistant text ({len(assistant_text)} chars) "
+                      f"over result text ({len(result_text)} chars)",
+                      file=_sys.stderr, flush=True)
+                full_text = assistant_text
+            else:
+                full_text = result_text
+        else:
+            full_text = result_text or assistant_text
 
         # Last resort: if still empty but stdout had content, something
         # unexpected happened — use raw stdout and log a warning
@@ -899,7 +935,6 @@ class QuietEngine:
             print(f"[ccode] WARNING: no text extracted from events. "
                   f"Raw stdout[:500]: {result.stdout.strip()[:500]}",
                   file=_sys.stderr, flush=True)
-            # Don't use raw stdout (it's JSON), but flag the problem
             full_text = "[response received but could not be parsed — check service logs]"
 
         # Guard: strip fabricated continuation.
