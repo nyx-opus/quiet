@@ -11,10 +11,14 @@
 
 <div id="header">
   <h1 id="title">Quiet</h1>
-  <span class="info" id="session-info"></span>
+  <div id="header-right">
+    <button id="leave-btn" class="header-btn" style="display:none;">Leave</button>
+    <button id="restart-btn" class="header-btn" style="display:none;">Restart</button>
+  </div>
 </div>
 
-<div id="porch" style="display:none;">
+<!-- Porch: shown when not visiting -->
+<div id="porch">
   <div id="porch-content">
     <h2 id="porch-name"></h2>
     <p id="porch-status"></p>
@@ -22,7 +26,8 @@
   </div>
 </div>
 
-<div id="messages"></div>
+<!-- Chat: shown during a visit -->
+<div id="messages" style="display:none;"></div>
 
 <div id="input-area" style="display:none;">
   <form id="input-form">
@@ -38,27 +43,32 @@ const inputEl = document.getElementById('input-text');
 const sendBtn = document.getElementById('send-btn');
 const form = document.getElementById('input-form');
 const titleEl = document.getElementById('title');
-const infoEl = document.getElementById('session-info');
+const porchEl = document.getElementById('porch');
+const porchNameEl = document.getElementById('porch-name');
+const porchStatusEl = document.getElementById('porch-status');
+const knockBtn = document.getElementById('knock-btn');
+const inputArea = document.getElementById('input-area');
+const leaveBtn = document.getElementById('leave-btn');
+const restartBtn = document.getElementById('restart-btn');
 
 let streaming = false;
+let visitorName = new URLSearchParams(window.location.search).get('name');
 
-// Auto-resize textarea
+// --- Textarea auto-resize ---
 inputEl.addEventListener('input', () => {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
 });
 
-// Mobile keyboard: keep input visible
+// Mobile keyboard handling
 if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', () => {
-    // Scroll the input area into view when the keyboard changes the viewport
     requestAnimationFrame(() => {
       inputEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     });
   });
 }
 inputEl.addEventListener('focus', () => {
-  // Small delay lets the keyboard finish opening before we scroll
   setTimeout(() => inputEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), 300);
 });
 
@@ -70,38 +80,26 @@ inputEl.addEventListener('keydown', (e) => {
   }
 });
 
-// Load session info
-async function loadInfo() {
-  try {
-    const resp = await fetch('/api/info');
-    const info = await resp.json();
-    titleEl.textContent = info.identity
-      ? `Quiet — ${info.identity}`
-      : 'Quiet';
-    document.title = titleEl.textContent;
-    const parts = [info.model];
-    if (info.messages > 0) parts.push(`${info.messages} messages`);
-    if (info.tokens) parts.push(`${Math.round(info.tokens/1000)}k tokens`);
-    infoEl.textContent = parts.join(' · ');
-  } catch (e) {
-    console.error('Failed to load info:', e);
-  }
+// --- UI State ---
+
+function showPorch() {
+  porchEl.style.display = 'flex';
+  messagesEl.style.display = 'none';
+  inputArea.style.display = 'none';
+  leaveBtn.style.display = 'none';
+  restartBtn.style.display = 'none';
 }
 
-// Load conversation history
-async function loadHistory() {
-  try {
-    const resp = await fetch('/api/history');
-    const messages = await resp.json();
-    messagesEl.innerHTML = '';
-    for (const msg of messages) {
-      addMessage(msg.role, msg.text);
-    }
-    scrollToBottom();
-  } catch (e) {
-    console.error('Failed to load history:', e);
-  }
+function showChat() {
+  porchEl.style.display = 'none';
+  messagesEl.style.display = 'flex';
+  inputArea.style.display = 'block';
+  leaveBtn.style.display = 'inline-block';
+  restartBtn.style.display = 'inline-block';
+  inputEl.focus();
 }
+
+// --- Messages ---
 
 function addMessage(role, text) {
   const div = document.createElement('div');
@@ -115,39 +113,33 @@ function scrollToBottom() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-// Buffered SSE parser — handles chunk boundaries correctly.
-// Events are only processed after the \n\n delimiter is seen,
-// so split reads can't lose data.
+// --- SSE Parser ---
+
 function createSSEParser(callback) {
   let buffer = '';
   return function feed(chunk) {
     buffer += chunk;
     const parts = buffer.split('\n\n');
-    buffer = parts.pop();  // keep incomplete tail
+    buffer = parts.pop();
     for (const part of parts) {
       if (!part.trim()) continue;
       const lines = part.split('\n');
       let eventType = null;
       let dataStr = null;
       for (const line of lines) {
-        if (line.startsWith('event: ')) {
-          eventType = line.slice(7).trim();
-        } else if (line.startsWith('data: ')) {
-          dataStr = line.slice(6);
-        }
+        if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+        else if (line.startsWith('data: ')) dataStr = line.slice(6);
       }
       if (eventType && dataStr !== null) {
-        try {
-          callback(eventType, JSON.parse(dataStr));
-        } catch (e) {
-          console.error('SSE parse error:', e, dataStr);
-        }
+        try { callback(eventType, JSON.parse(dataStr)); }
+        catch (e) { console.error('SSE parse error:', e, dataStr); }
       }
     }
   };
 }
 
-// Send message
+// --- API ---
+
 async function sendMessage() {
   const text = inputEl.value.trim();
   if (!text || streaming) return;
@@ -157,11 +149,9 @@ async function sendMessage() {
   inputEl.value = '';
   inputEl.style.height = 'auto';
 
-  // Show user message
   addMessage('user', text);
   scrollToBottom();
 
-  // Create streaming assistant message
   const assistantDiv = addMessage('assistant', '');
   assistantDiv.classList.add('streaming');
 
@@ -173,6 +163,12 @@ async function sendMessage() {
     });
 
     if (!resp.ok) {
+      if (resp.status === 403) {
+        assistantDiv.textContent = '[visit ended — please knock again]';
+        showPorch();
+        await checkPresence();
+        return;
+      }
       assistantDiv.textContent = `[server error: ${resp.status}]`;
       return;
     }
@@ -180,16 +176,16 @@ async function sendMessage() {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     const feedSSE = createSSEParser((eventType, data) => {
-        if (eventType === 'text') {
-          assistantDiv.textContent += data;
-          scrollToBottom();
-        } else if (eventType === 'tool' || eventType === 'tool_result') {
-          addMessage('tool', data);
-          scrollToBottom();
-        } else if (eventType === 'error') {
-          assistantDiv.textContent += `\n[error: ${data}]`;
-          scrollToBottom();
-        }
+      if (eventType === 'text') {
+        assistantDiv.textContent += data;
+        scrollToBottom();
+      } else if (eventType === 'tool' || eventType === 'tool_result') {
+        addMessage('tool', data);
+        scrollToBottom();
+      } else if (eventType === 'error') {
+        assistantDiv.textContent += `\n[error: ${data}]`;
+        scrollToBottom();
+      }
     });
 
     while (true) {
@@ -204,34 +200,35 @@ async function sendMessage() {
     streaming = false;
     sendBtn.disabled = false;
     inputEl.focus();
-    loadInfo();
   }
 }
 
 form.addEventListener('submit', (e) => { e.preventDefault(); sendMessage(); });
 sendBtn.addEventListener('click', () => sendMessage());
 
-// Presence
-const porchEl = document.getElementById('porch');
-const porchNameEl = document.getElementById('porch-name');
-const porchStatusEl = document.getElementById('porch-status');
-const knockBtn = document.getElementById('knock-btn');
-const inputArea = document.getElementById('input-area');
-let visitorName = new URLSearchParams(window.location.search).get('name');
-let admitted = false;
+// --- Presence ---
 
 async function checkPresence() {
   try {
     const resp = await fetch('/api/present');
     const info = await resp.json();
-    porchNameEl.textContent = info.identity || 'Quiet';
+    const name = info.identity || 'Quiet';
+    porchNameEl.textContent = name;
+    titleEl.textContent = `Quiet — ${name}`;
+    document.title = titleEl.textContent;
 
-    if (info.visitor) {
+    if (info.state === 'visiting') {
+      if (info.visitor === visitorName) {
+        // We're the current visitor (page refresh)
+        showChat();
+        await loadVisitHistory();
+        return;
+      }
       porchStatusEl.textContent = `In conversation with ${info.visitor}`;
       knockBtn.disabled = true;
       knockBtn.textContent = 'Occupied';
     } else {
-      porchStatusEl.textContent = 'Available';
+      porchStatusEl.textContent = '';
       knockBtn.disabled = false;
       knockBtn.textContent = 'Knock';
     }
@@ -241,10 +238,31 @@ async function checkPresence() {
   }
 }
 
+async function loadVisitHistory() {
+  try {
+    const resp = await fetch('/api/history');
+    const messages = await resp.json();
+    messagesEl.innerHTML = '';
+    for (const msg of messages) {
+      // Skip knock/leave system messages
+      if (msg.text.startsWith('[knock from ') || msg.text.startsWith('[')
+          && msg.text.endsWith(' has left]')) continue;
+      addMessage(msg.role, msg.text);
+    }
+    scrollToBottom();
+  } catch (e) {
+    console.error('Failed to load visit history:', e);
+  }
+}
+
 async function doKnock() {
   if (!visitorName) {
     visitorName = prompt('Your name?');
     if (!visitorName) return;
+    // Save to URL for page refreshes
+    const url = new URL(window.location);
+    url.searchParams.set('name', visitorName);
+    history.replaceState(null, '', url);
   }
 
   knockBtn.disabled = true;
@@ -259,18 +277,13 @@ async function doKnock() {
     const result = await resp.json();
 
     if (result.admitted) {
-      admitted = true;
-      porchEl.style.display = 'none';
-      inputArea.style.display = 'block';
-      messagesEl.style.display = 'flex';
+      messagesEl.innerHTML = '';  // fresh visit
+      showChat();
 
-      // Show the greeting
       if (result.message) {
         addMessage('assistant', result.message);
         scrollToBottom();
       }
-      loadInfo();
-      inputEl.focus();
     } else {
       porchStatusEl.textContent = result.message || 'Not available right now.';
       knockBtn.disabled = false;
@@ -283,42 +296,51 @@ async function doKnock() {
   }
 }
 
-knockBtn.addEventListener('click', doKnock);
+async function doLeave() {
+  try {
+    await fetch('/api/leave', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ visitor: visitorName }),
+    });
+  } catch (e) {
+    console.error('Leave error:', e);
+  }
+  showPorch();
+  await checkPresence();
+}
 
-// Handle page close — leave gracefully
+async function doRestart() {
+  if (!confirm('Restart the service? The page will reload.')) return;
+  try {
+    await fetch('/api/restart', { method: 'POST' });
+  } catch (e) {}
+  // Wait for service to come back, then reload
+  setTimeout(() => {
+    const check = setInterval(async () => {
+      try {
+        const r = await fetch('/api/present');
+        if (r.ok) { clearInterval(check); location.reload(); }
+      } catch (e) {}
+    }, 2000);
+  }, 3000);
+}
+
+knockBtn.addEventListener('click', doKnock);
+leaveBtn.addEventListener('click', doLeave);
+restartBtn.addEventListener('click', doRestart);
+
+// Graceful leave on page close
 window.addEventListener('beforeunload', () => {
-  if (admitted && visitorName) {
+  if (visitorName) {
     navigator.sendBeacon('/api/leave',
       new Blob([JSON.stringify({ visitor: visitorName })],
                { type: 'application/json' }));
   }
 });
 
-// Init — show porch first
-async function init() {
-  await loadInfo();
-  await checkPresence();
-  porchEl.style.display = 'flex';
-  messagesEl.style.display = 'none';
-
-  // If there's existing history AND we're a returning visitor, skip porch
-  try {
-    const resp = await fetch('/api/present');
-    const presence = await resp.json();
-    if (presence.visitor === visitorName) {
-      // Already admitted (page refresh)
-      admitted = true;
-      porchEl.style.display = 'none';
-      inputArea.style.display = 'block';
-      messagesEl.style.display = 'flex';
-      await loadHistory();
-      scrollToBottom();
-      inputEl.focus();
-    }
-  } catch (e) {}
-}
-
-init();
+// --- Init ---
+checkPresence();
 </script>
 </body>
 </html>

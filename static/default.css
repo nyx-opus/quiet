@@ -45,9 +45,25 @@ body {
   color: var(--accent);
 }
 
-#header .info {
-  font-size: 0.8em;
+#header-right {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.header-btn {
+  background: transparent;
   color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: 0.8em;
+}
+
+.header-btn:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
 }
 
 #messages {

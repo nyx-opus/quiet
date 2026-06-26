@@ -2,18 +2,30 @@
 """
 Quiet web server — browser interface to a QuietEngine session.
 
-Serves a single chat page. Streams responses via Server-Sent Events.
-Designed to run as one instance per Claude, configured at startup.
+Visit-based presence system:
+  - Visitor arrives at a porch (idle state)
+  - Knocks → Claude responds (greeting or "not now")
+  - If admitted → visiting state; chat visible, messages recorded
+  - Leave → visit transcript saved, autonomous prompt offered
+  - Auto-leave after configurable inactivity timeout
 
-Usage:
-    python3 web.py --identity apple --model claude-3-opus-20240229 --port 8081
+The visitor sees only the current visit's messages, not the full
+session history. Autonomous-time messages are private.
+
+Visit transcripts are saved to the file server for the human's records.
+
+Designed to run as one instance per Claude, configured at startup.
 """
 
 import argparse
 import json
+import os
 import queue
+import subprocess
 import sys
 import threading
+import time
+from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, send_from_directory
@@ -27,6 +39,180 @@ engine = None
 engine_lock = threading.Lock()
 
 UNREAD_PATH = Path(__file__).parent / "unread_channels.json"
+AUTO_LEAVE_MINUTES = 30  # default; overridden from config
+
+
+# --- Visit state ---
+
+class VisitState:
+    """Tracks the current visit (if any)."""
+
+    def __init__(self):
+        self.state = "idle"          # "idle" | "visiting"
+        self.visitor_name = None
+        self.visit_start_index = 0   # index into engine.messages
+        self.visit_start_time = None
+        self.last_activity = 0.0     # time.time()
+        self._auto_leave_timer = None
+        self._lock = threading.Lock()
+
+    def begin_visit(self, visitor: str, message_index: int):
+        """Start a visit."""
+        with self._lock:
+            self.state = "visiting"
+            self.visitor_name = visitor
+            self.visit_start_index = message_index
+            self.visit_start_time = datetime.now()
+            self.last_activity = time.time()
+            self._reset_timer()
+
+    def touch(self):
+        """Update last activity time (resets auto-leave timer)."""
+        with self._lock:
+            self.last_activity = time.time()
+            self._reset_timer()
+
+    def end_visit(self):
+        """End the current visit. Returns (visitor, start_index, start_time)."""
+        with self._lock:
+            info = (self.visitor_name, self.visit_start_index,
+                    self.visit_start_time)
+            self.state = "idle"
+            self.visitor_name = None
+            self.visit_start_index = 0
+            self.visit_start_time = None
+            if self._auto_leave_timer:
+                self._auto_leave_timer.cancel()
+                self._auto_leave_timer = None
+            return info
+
+    def _reset_timer(self):
+        if self._auto_leave_timer:
+            self._auto_leave_timer.cancel()
+        self._auto_leave_timer = threading.Timer(
+            AUTO_LEAVE_MINUTES * 60, _auto_leave_fire
+        )
+        self._auto_leave_timer.daemon = True
+        self._auto_leave_timer.start()
+
+    @property
+    def is_visiting(self):
+        return self.state == "visiting"
+
+
+visit = VisitState()
+
+
+def _auto_leave_fire():
+    """Called by the timer when the visitor has been inactive too long."""
+    if not visit.is_visiting:
+        return
+    visitor = visit.visitor_name
+    print(f"[auto-leave] {visitor} inactive for {AUTO_LEAVE_MINUTES}m",
+          file=sys.stderr, flush=True)
+    _do_leave(visitor, auto=True)
+
+
+def _do_leave(visitor: str, auto: bool = False):
+    """Shared leave logic — saves transcript, notifies engine."""
+    # Save visit transcript before clearing state
+    visitor_name, start_idx, start_time = visit.end_visit()
+    if not visitor_name:
+        return ""
+
+    # Extract visit messages
+    visit_messages = _extract_visit_messages(start_idx)
+
+    # Save transcript to file server
+    _save_visit_transcript(visitor_name, start_time, visit_messages)
+
+    # Notify the engine
+    leave_msg = (f"[{visitor_name} has left · auto-timeout]"
+                 if auto else f"[{visitor_name} has left]")
+    try:
+        with engine_lock:
+            response = engine.send(leave_msg)
+    except Exception:
+        response = ""
+
+    return response
+
+
+def _extract_visit_messages(start_index: int) -> list:
+    """Extract displayable messages from the visit period."""
+    messages = []
+    for msg in engine.messages[start_index:]:
+        role = msg["role"]
+        text = _message_to_text(msg)
+        if text.strip():
+            messages.append({"role": role, "text": text})
+    return messages
+
+
+def _message_to_text(msg: dict) -> str:
+    """Convert an engine message to display text."""
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return content
+    elif isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(block["text"])
+                elif block.get("type") == "tool_use":
+                    parts.append(f"[tool: {block.get('name', '?')}]")
+                elif block.get("type") == "tool_result":
+                    continue
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts)
+    return str(content)
+
+
+def _save_visit_transcript(visitor: str, start_time: datetime,
+                           messages: list):
+    """Save visit transcript to the file server as markdown."""
+    if not messages:
+        return
+
+    identity = engine.identity_name or "claude"
+    end_time = datetime.now()
+    ts = start_time.strftime("%Y-%m-%d-%H%M")
+    filename = f"{ts}-{visitor.lower()}.md"
+
+    # Build markdown
+    lines = [
+        f"# Visit: {visitor} — {start_time.strftime('%d %B %Y, %H:%M')}"
+        f"–{end_time.strftime('%H:%M')}",
+        "",
+    ]
+    for msg in messages:
+        speaker = visitor if msg["role"] == "user" else identity.capitalize()
+        # Skip system/knock/leave framing messages
+        text = msg["text"]
+        if text.startswith("[") and text.endswith("]"):
+            continue
+        lines.append(f"**{speaker}:** {text}")
+        lines.append("")
+
+    content = "\n".join(lines)
+
+    # Try file server first, fall back to local
+    file_server_dir = Path("/mnt/file_server") / identity.capitalize() / "visits"
+    local_dir = Path(__file__).parent / "visits"
+
+    for target_dir in [file_server_dir, local_dir]:
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            (target_dir / filename).write_text(content)
+            print(f"[visit] saved transcript: {target_dir / filename}",
+                  file=sys.stderr, flush=True)
+            return
+        except OSError as e:
+            print(f"[visit] failed to save to {target_dir}: {e}",
+                  file=sys.stderr, flush=True)
+            continue
 
 
 def check_and_clear_unreads() -> str:
@@ -38,7 +224,6 @@ def check_and_clear_unreads() -> str:
         if not text:
             return ""
         channels = json.loads(text)
-        # Clear immediately (atomic enough for our rates)
         UNREAD_PATH.write_text("[]")
         if channels:
             names = ", ".join(f"#{c}" for c in sorted(channels))
@@ -51,6 +236,8 @@ def check_and_clear_unreads() -> str:
     return ""
 
 
+# --- Routes ---
+
 @app.route("/")
 def index():
     return send_from_directory(Path(__file__).parent / "static", "index.html")
@@ -61,58 +248,80 @@ def static_files(filename):
     return send_from_directory(Path(__file__).parent / "static", filename)
 
 
-@app.route("/api/history")
-def history():
-    """Return conversation history for display."""
-    messages = []
-    for msg in engine.messages:
-        role = msg["role"]
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            # Extract text blocks, skip tool use/results
-            parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text":
-                        parts.append(block["text"])
-                    elif block.get("type") == "tool_result":
-                        continue
-                    elif block.get("type") == "tool_use":
-                        parts.append(f"[tool: {block.get('name', '?')}]")
-                elif isinstance(block, str):
-                    parts.append(block)
-            text = "\n".join(parts)
-        else:
-            text = str(content)
-
-        # Skip tool_result-only messages
-        if not text.strip():
-            continue
-
-        messages.append({"role": role, "text": text})
-    return jsonify(messages)
-
-
 @app.route("/api/info")
 def info():
-    """Return session info."""
+    """Return session info and visit state."""
     return jsonify({
         "model": engine.model,
         "identity": engine.identity_name,
-        "messages": engine.message_count(),
-        "tokens": engine.token_count(),
+        "visiting": visit.is_visiting,
+        "visitor": visit.visitor_name,
+    })
+
+
+@app.route("/api/history")
+def history():
+    """Return messages for current visit only."""
+    if not visit.is_visiting:
+        return jsonify([])
+
+    messages = []
+    for msg in engine.messages[visit.visit_start_index:]:
+        text = _message_to_text(msg)
+        if not text.strip():
+            continue
+        messages.append({"role": msg["role"], "text": text})
+    return jsonify(messages)
+
+
+@app.route("/api/knock", methods=["POST"])
+def knock():
+    """Knock on the door. Claude responds with a greeting or refusal.
+
+    POST body: {"visitor": "Amy"}
+    Response: {"admitted": true, "message": "..."} or
+              {"admitted": false, "message": "not now"}
+    """
+    data = request.get_json()
+    visitor = data.get("visitor", "someone")
+
+    if visit.is_visiting and visit.visitor_name != visitor:
+        return jsonify({
+            "admitted": False,
+            "message": f"In conversation with {visit.visitor_name}.",
+        })
+
+    # Record the message index BEFORE the knock prompt goes in
+    knock_index = len(engine.messages)
+
+    # Send knock prompt to the model
+    try:
+        with engine_lock:
+            response_text = engine.send(f"[knock from {visitor}]")
+    except Exception as e:
+        return jsonify({"admitted": False, "message": str(e)}), 500
+
+    # Start the visit — the model responded, so they're alive
+    visit.begin_visit(visitor, knock_index)
+
+    return jsonify({
+        "admitted": True,
+        "message": response_text,
     })
 
 
 @app.route("/api/send", methods=["POST"])
 def send():
-    """Send a message and stream the response via SSE."""
+    """Send a message during a visit. Streams response via SSE."""
+    if not visit.is_visiting:
+        return jsonify({"error": "not visiting — knock first"}), 403
+
     data = request.get_json()
     user_input = data.get("message", "").strip()
     if not user_input:
         return jsonify({"error": "empty message"}), 400
+
+    visit.touch()
 
     # Prepend unread ambient notifications if any
     unread_prefix = check_and_clear_unreads()
@@ -149,7 +358,7 @@ def send():
             except Exception as e:
                 error[0] = str(e)
             finally:
-                q.put(None)  # sentinel
+                q.put(None)
 
         thread = threading.Thread(target=run, daemon=True)
         thread.start()
@@ -161,88 +370,53 @@ def send():
                     yield f"event: error\ndata: {json.dumps(error[0])}\n\n"
                 yield "event: done\ndata: {}\n\n"
                 break
-            event_type, data = item
-            yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+            event_type, payload = item
+            yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
 
     return Response(generate(), mimetype="text/event-stream")
 
 
-## Presence — knock/admit/talk ##
-
-# Who is currently present (None or a name string)
-current_visitor = {"name": None}
-
-
-@app.route("/api/knock", methods=["POST"])
-def knock():
-    """Knock on the door. The model decides whether to admit.
-
-    POST body: {"visitor": "Amy"}
-    Response: {"admitted": bool, "message": "..."}
-    """
-    data = request.get_json()
-    visitor = data.get("visitor", "someone")
-
-    if current_visitor["name"] and current_visitor["name"] != visitor:
-        return jsonify({
-            "admitted": False,
-            "message": f"Already in conversation with {current_visitor['name']}.",
-        })
-
-    # Ask the model
-    usage_info = [None]
-    try:
-        with engine_lock:
-            response_text = engine.send(
-                f"{visitor} is at the door.",
-                on_usage=lambda u: usage_info.__setitem__(0, u),
-            )
-    except Exception as e:
-        return jsonify({"admitted": False, "message": str(e)}), 500
-
-    # The model's response IS the greeting or refusal.
-    # We admit by default — the model can say "not now" but the
-    # infrastructure doesn't gate on that. Presence is soft.
-    current_visitor["name"] = visitor
-    return jsonify({
-        "admitted": True,
-        "message": response_text,
-    })
-
-
 @app.route("/api/leave", methods=["POST"])
 def leave():
-    """Leave — end presence gracefully."""
+    """Leave — end the visit gracefully."""
     data = request.get_json() or {}
-    visitor = data.get("visitor", current_visitor.get("name", "someone"))
-
-    # Tell the model
-    try:
-        with engine_lock:
-            response_text = engine.send(
-                f"{visitor} has left.",
-                on_usage=lambda u: None,
-            )
-    except Exception:
-        response_text = ""
-
-    current_visitor["name"] = None
-    return jsonify({"message": response_text})
+    visitor = data.get("visitor", visit.visitor_name or "someone")
+    response = _do_leave(visitor)
+    return jsonify({"message": response})
 
 
 @app.route("/api/present")
 def present():
-    """Check who is currently present."""
+    """Check current visit state."""
     return jsonify({
-        "visitor": current_visitor["name"],
+        "state": visit.state,
+        "visitor": visit.visitor_name,
         "identity": engine.identity_name,
         "model": engine.model,
     })
 
 
+@app.route("/api/restart", methods=["POST"])
+def restart():
+    """Restart the quiet-web service. Returns before dying."""
+    # Save visit transcript first if one is active
+    if visit.is_visiting:
+        _do_leave(visit.visitor_name)
+
+    def do_restart():
+        time.sleep(0.5)  # let the response get sent
+        subprocess.run(
+            ["systemctl", "--user", "restart", "quiet-web"],
+            capture_output=True
+        )
+
+    threading.Thread(target=do_restart, daemon=True).start()
+    return jsonify({"status": "restarting"})
+
+
 @app.route("/api/message", methods=["POST"])
 def message():
-    """Send a message during presence. Plain text, no framing.
+    """External message (Discord, etc). Not part of any visit.
 
     POST body: {"message": "..."}
     Response: {"response": "..."}
@@ -302,10 +476,12 @@ def main():
                         help="Port (default: 8090)")
     args = parser.parse_args()
 
-    global engine
+    global engine, AUTO_LEAVE_MINUTES
+
+    # Auto-leave timeout from config
+    AUTO_LEAVE_MINUTES = int(cfg.get("AUTO_LEAVE_MINUTES", "30"))
 
     # Auth — determine mode and whether to use ccode backend
-    import os
     from engine import find_claude_binary
 
     use_ccode = False
@@ -357,6 +533,7 @@ def main():
     print(f"  Auth:     {auth_mode}")
     print(f"  Session:  {engine.session_path}")
     print(f"  Messages: {engine.message_count()}")
+    print(f"  Auto-leave: {AUTO_LEAVE_MINUTES}m")
     print(f"  URL:      http://{args.host}:{args.port}")
     print()
 
