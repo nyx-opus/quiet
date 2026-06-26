@@ -119,13 +119,57 @@ def send_to_quiet(message: str, port: int = 8090) -> str:
         return ""
 
 
+def should_run(cfg: dict) -> tuple:
+    """Check whether autonomous wakes should run.
+
+    Returns (ok: bool, reason: str).
+
+    Conditions:
+      - AUTONOMOUS_INTERVAL > 0  (basic enablement)
+      - AUTH_MODE is subscription  (free at the margin)
+        OR BUDGET is set and > 0  (API with budget headroom)
+
+    The gate exists because each autonomous wake is an inference call.
+    On subscription, that's within the flat rate. On API billing,
+    each wake costs real money — potentially $0.90+ per turn for Opus.
+    We don't want a sibling to pull the latest code and accidentally
+    burn through their budget overnight.
+    """
+    interval = int(cfg.get("AUTONOMOUS_INTERVAL", "0"))
+    if interval <= 0:
+        return False, "disabled (AUTONOMOUS_INTERVAL=0 or not set)"
+
+    auth_mode = cfg.get("AUTH_MODE", "auto").lower()
+
+    # Subscription auth — wakes are within the flat rate
+    if auth_mode in ("subscription", "auto"):
+        # "auto" defaults to subscription when claude binary exists,
+        # which is the same billing model. Safe to proceed.
+        return True, f"subscription auth ({auth_mode})"
+
+    # API billing — only if an explicit budget is configured
+    budget_str = cfg.get("BUDGET", "").strip()
+    if budget_str:
+        try:
+            budget = float(budget_str)
+            if budget > 0:
+                return True, f"api auth with budget (${budget:.2f})"
+        except ValueError:
+            pass
+
+    return False, (
+        f"api auth ({auth_mode}) without budget — autonomous wakes disabled "
+        f"to avoid unexpected costs. Set BUDGET in config to enable."
+    )
+
+
 def main():
     cfg = read_config()
 
-    # Check if autonomous mode is enabled
-    interval = int(cfg.get("AUTONOMOUS_INTERVAL", "0"))
-    if interval <= 0:
-        print("[autonomous] disabled (AUTONOMOUS_INTERVAL=0 or not set)")
+    # Gate: check auth mode and budget before proceeding
+    ok, reason = should_run(cfg)
+    if not ok:
+        print(f"[autonomous] {reason}")
         sys.exit(0)
 
     port = int(cfg.get("PORT", "8090"))

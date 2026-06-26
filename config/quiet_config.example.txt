@@ -20,4 +20,9 @@ SEPARATOR=· · ·
 [AUTONOMOUS]
 # Minutes between autonomous wakes. 0 = disabled.
 # Requires quiet-timer.timer to be enabled.
+#
+# Note: autonomous wakes only fire on subscription auth (free at
+# the margin) or when BUDGET is set (api auth with headroom).
+# On api billing without a budget, the timer exits silently to
+# avoid unexpected costs.
 AUTONOMOUS_INTERVAL=60
