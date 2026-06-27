@@ -32,7 +32,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 import config_reader
 
 from auth import create_client
-from engine import QuietEngine, DEFAULT_MODEL, MAX_OUTPUT_TOKENS
+from engine import QuietEngine, DEFAULT_MODEL, MAX_OUTPUT_TOKENS, set_claude_state
 
 app = Flask(__name__)
 engine = None
@@ -65,6 +65,7 @@ class VisitState:
             self.visit_start_time = datetime.now()
             self.last_activity = time.time()
             self._reset_timer()
+        set_claude_state("present")
 
     def touch(self):
         """Update last activity time (resets auto-leave timer)."""
@@ -84,7 +85,8 @@ class VisitState:
             if self._auto_leave_timer:
                 self._auto_leave_timer.cancel()
                 self._auto_leave_timer = None
-            return info
+        set_claude_state("idle")
+        return info
 
     def _reset_timer(self):
         if self._auto_leave_timer:
@@ -293,6 +295,9 @@ def knock():
 
     # Record the message index BEFORE the knock prompt goes in
     knock_index = len(engine.messages)
+
+    # Signal LED daemon: someone's at the door
+    set_claude_state("listening")
 
     # Send knock prompt to the model
     try:
@@ -549,6 +554,9 @@ def main():
     print(f"  Auto-leave: {AUTO_LEAVE_MINUTES}m")
     print(f"  URL:      http://{args.host}:{args.port}")
     print()
+
+    # Initial state: idle, nobody visiting
+    set_claude_state("idle")
 
     app.run(host=args.host, port=args.port, debug=False, threaded=True)
 

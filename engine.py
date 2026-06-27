@@ -20,7 +20,7 @@ import base64
 import json
 import mimetypes
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -38,6 +38,35 @@ from backends.sdk import sdk_send
 from tools import define_tools
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
+
+# --- Claude state file for LED daemon ---
+# Same format as ClAP's claude_state.json — the LED daemon reads this
+# to drive figurine lighting based on what the Claude is doing.
+# States: thinking, present, idle, listening, off
+STATE_FILE = Path(__file__).parent / "data" / "claude_state.json"
+
+
+def set_claude_state(state: str, dnd: bool = False):
+    """Write the Claude state file for the LED daemon.
+
+    The daemon polls this every 2 seconds and drives LEDs accordingly.
+    This replaces ClAP's tmux-based detection with a direct write from
+    the engine, which knows exactly when inference starts and stops.
+    """
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing = json.loads(STATE_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        existing = {}
+
+    changed = existing.get("state") != state
+    data = {
+        "state": state,
+        "since": (datetime.now(timezone.utc).isoformat(timespec="seconds")
+                  if changed else existing.get("since", "")),
+        "dnd": dnd,
+    }
+    STATE_FILE.write_text(json.dumps(data, indent=2))
 
 ARCHIVE_DIR = Path(__file__).parent / "archives"
 IDENTITY_DIR = Path(__file__).parent / "identities"
@@ -379,6 +408,9 @@ class QuietEngine:
         # Trim context if needed (all backends)
         self.trim_context()
 
+        # Signal LED daemon: inference starting
+        set_claude_state("thinking")
+
         if self.backend == "ccode":
             full_text = ccode_send(
                 user_input,
@@ -407,6 +439,9 @@ class QuietEngine:
                 on_tool_result=on_tool_result,
                 on_usage=on_usage,
             )
+
+        # Signal LED daemon: inference complete
+        set_claude_state("present")
 
         # Auto-save after each exchange
         self.save_session()
