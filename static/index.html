@@ -72,6 +72,25 @@ inputEl.addEventListener('focus', () => {
   setTimeout(() => inputEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), 300);
 });
 
+// --- Typing heartbeat (prevents auto-leave while composing) ---
+let heartbeatTimer = null;
+let lastHeartbeat = 0;
+const HEARTBEAT_INTERVAL = 20000;  // 20 seconds
+
+function sendHeartbeat() {
+  const now = Date.now();
+  if (now - lastHeartbeat < HEARTBEAT_INTERVAL) return;
+  lastHeartbeat = now;
+  fetch('/api/heartbeat', { method: 'POST' }).catch(() => {});
+}
+
+inputEl.addEventListener('input', () => {
+  sendHeartbeat();
+  // Also reset a trailing heartbeat for continued typing
+  clearTimeout(heartbeatTimer);
+  heartbeatTimer = setTimeout(sendHeartbeat, HEARTBEAT_INTERVAL);
+});
+
 // Shift+Enter for newline, Enter to send
 inputEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {

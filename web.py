@@ -385,6 +385,19 @@ def leave():
     return jsonify({"message": response})
 
 
+@app.route("/api/heartbeat", methods=["POST"])
+def heartbeat():
+    """Typing heartbeat — resets auto-leave timer without sending a message.
+
+    Called by the client while the visitor is typing. Prevents auto-leave
+    from firing when someone is composing a long reply.
+    """
+    if not visit.is_visiting:
+        return jsonify({"ok": False}), 403
+    visit.touch()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/present")
 def present():
     """Check current visit state."""
