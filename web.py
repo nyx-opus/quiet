@@ -432,6 +432,16 @@ def restart():
     return jsonify({"status": "restarting"})
 
 
+@app.route("/api/status", methods=["GET"])
+def status():
+    """Health/state check — no inference, no auth needed."""
+    return jsonify({
+        "status": "ok",
+        "visiting": visit.is_visiting,
+        "visitor": visit.visitor_name,
+    })
+
+
 @app.route("/api/message", methods=["POST"])
 def message():
     """External message (Discord, etc). Not part of any visit.
@@ -444,6 +454,13 @@ def message():
 
     if not user_input:
         return jsonify({"error": "empty message"}), 400
+
+    # Skip autonomous wakes during visits — don't interrupt conversations
+    if user_input.startswith("[autonomous") and visit.is_visiting:
+        return jsonify({
+            "response": "",
+            "skipped": "visit active",
+        })
 
     # Prepend unread ambient notifications if any
     unread_prefix = check_and_clear_unreads()
