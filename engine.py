@@ -446,6 +446,10 @@ class QuietEngine:
         # Auto-save after each exchange
         self.save_session()
 
+        # Trim after save too — keeps context gradual rather than cliff-edge.
+        # Without this, autonomous wakes accumulate unchecked between visits.
+        self.trim_context()
+
         return full_text
 
     # --- Convenience properties ---

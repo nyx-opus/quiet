@@ -205,7 +205,10 @@ def trim_context(messages: list, model: str, threshold: int,
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "text":
                         total += len(block.get("text", ""))
-        return total // 4
+        tokens = total // 4
+        if backend == "ccode":
+            tokens += CCODE_OVERHEAD_TOKENS
+        return tokens
 
     if backend != "ccode" and client:
         try:
@@ -244,11 +247,21 @@ def trim_context(messages: list, model: str, threshold: int,
                 f.write(json.dumps(serialise_message(msg)) + "\n")
 
 
+
+# ccode adds its own system prompts, tool descriptions, and formatting
+# on top of whatever we send.  The chars/4 estimate only counts *our*
+# content, so it under-estimates by this much in ccode mode.
+CCODE_OVERHEAD_TOKENS = 80_000
+
+
 def estimate_tokens(messages: list, system=None,
                     ccode_prompt_file: Path = None) -> int:
     """Estimate total context tokens using char count / 4.
 
     Good enough for trim decisions without needing an API call.
+    When a ccode_prompt_file is provided we add CCODE_OVERHEAD_TOKENS
+    to account for tool descriptions and system prompts that ccode
+    injects on its own.
     """
     total_chars = 0
     if ccode_prompt_file:
@@ -268,4 +281,7 @@ def estimate_tokens(messages: list, system=None,
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "text":
                     total_chars += len(block.get("text", ""))
-    return total_chars // 4
+    tokens = total_chars // 4
+    if ccode_prompt_file:
+        tokens += CCODE_OVERHEAD_TOKENS
+    return tokens
