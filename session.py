@@ -87,7 +87,10 @@ def serialise_message(msg):
                     blocks.append({"type": "text",
                                    "text": "[image data omitted from session]"})
                 else:
-                    blocks.append(block)
+                    # Strip cache_control — it's runtime-only, not for persistence
+                    clean = {k: v for k, v in block.items()
+                             if k != "cache_control"}
+                    blocks.append(clean)
             elif hasattr(block, 'text'):
                 blocks.append({"type": "text", "text": block.text})
             elif hasattr(block, 'type') and block.type == 'tool_use':

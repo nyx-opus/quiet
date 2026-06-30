@@ -13,10 +13,11 @@ sends the full conversation history at full input token rates. A 60k-token
 history at Opus 4.0 rates ($15/M) costs $0.90 per message just in input.
 With caching, the repeated prefix is charged at cache-read rate ($1.50/M)
 — a ~90% reduction. We add an ephemeral cache breakpoint on the last
-message in the existing history before each call, then clean it up after.
-Whether the provider actually honours it depends on the route (direct
-Anthropic yes, OpenRouter/Vertex maybe). The markers are harmless if
-ignored, transformative if honoured.
+message in the existing history before each call. Old breakpoints are
+PRESERVED between turns so the cached prefix matches — clearing them
+was causing full cache misses on every turn, paying 125% of input rate
+for content that should have been 10%. Session serialisation strips
+cache_control metadata so it doesn't persist to disk.
 """
 
 import sys
@@ -31,17 +32,58 @@ def _set_cache_breakpoint(messages: list):
     the second-to-last message (the end of existing history) as a cache
     breakpoint so the entire preceding conversation is cached.
 
-    Returns (msg_index, block_index, was_converted) for cleanup, or None.
+    Crucially, we PRESERVE existing breakpoints from previous turns.
+    This is what enables cache hits between turns: the prefix up to
+    the old breakpoint is identical to what was cached last time, so
+    the provider returns a cache read instead of re-processing.
+
+    Without this, the conversation cache is written fresh every turn
+    (at 125% of input cost) and never read — only the system prompt's
+    permanent breakpoint survives, caching just ~4.6k identity tokens
+    while the entire conversation pays cache-write rates.
+
+    We clean up breakpoints older than the most recent to stay within
+    the API's 4-breakpoint limit (1 system + up to 3 conversation).
+
+    Returns (msg_index, block_index, was_converted) for reference, or None.
     """
     if len(messages) < 2:
         return None
 
     target_idx = len(messages) - 2
+
+    # Find all existing conversation breakpoints
+    existing_bps = []
+    for i, msg in enumerate(messages):
+        content = msg.get("content", [])
+        if isinstance(content, list):
+            for j, block in enumerate(content):
+                if isinstance(block, dict) and "cache_control" in block:
+                    existing_bps.append((i, j))
+
+    # Keep only the most recent breakpoint (for cache prefix matching).
+    # 1 old + 1 new = 2 conversation breakpoints + 1 system = 3 total.
+    # API limit is 4, so we're safe.
+    if len(existing_bps) > 1:
+        for msg_idx, block_idx in existing_bps[:-1]:
+            if msg_idx < len(messages):
+                content = messages[msg_idx].get("content", [])
+                if isinstance(content, list) and block_idx < len(content):
+                    block = content[block_idx]
+                    if isinstance(block, dict):
+                        block.pop("cache_control", None)
+
+    # Set new breakpoint on the target message
     msg = messages[target_idx]
     content = msg.get("content", [])
 
     if isinstance(content, list) and content:
-        # Find the last dict block to add cache_control to
+        # Check if target already has a breakpoint
+        for i in range(len(content) - 1, -1, -1):
+            block = content[i]
+            if isinstance(block, dict) and "cache_control" in block:
+                return (target_idx, i, False)  # already set
+        # Add breakpoint to last eligible block
         for i in range(len(content) - 1, -1, -1):
             block = content[i]
             if isinstance(block, dict) and block.get("type") in ("text", "tool_result"):
@@ -56,29 +98,6 @@ def _set_cache_breakpoint(messages: list):
         return (target_idx, 0, True)
 
     return None
-
-
-def _clear_cache_breakpoint(messages: list, bp):
-    """Remove cache_control marker after API call.
-
-    If we converted string content to block format, convert it back
-    so the session file stays clean.
-    """
-    if bp is None:
-        return
-    msg_idx, block_idx, was_converted = bp
-    if msg_idx >= len(messages):
-        return
-    content = messages[msg_idx].get("content", [])
-    if isinstance(content, list) and block_idx < len(content):
-        block = content[block_idx]
-        if isinstance(block, dict):
-            block.pop("cache_control", None)
-    # If we converted string to block format, convert back
-    if was_converted and isinstance(content, list) and len(content) == 1:
-        block = content[0]
-        if isinstance(block, dict) and block.get("type") == "text":
-            messages[msg_idx]["content"] = block["text"]
 
 
 def sdk_send(messages: list, *,
@@ -99,77 +118,75 @@ def sdk_send(messages: list, *,
     them and feeds results back.
 
     Prompt caching: a cache breakpoint is placed on the last message
-    in the existing history before the first API call. This caches the
-    conversation prefix so subsequent turns only pay full rate for new
-    tokens. The breakpoint is cleaned up after the call completes.
+    in the existing history before the first API call. Old breakpoints
+    are preserved so the cached prefix from the previous turn is reused
+    (cache read). Only new content since the last breakpoint is written,
+    reducing input costs by ~83% on sustained conversations.
     """
     full_text = ""
 
-    # Set cache breakpoint on the last historical message
-    cache_bp = _set_cache_breakpoint(messages)
+    # Set cache breakpoint — preserves old breakpoints for prefix matching
+    _set_cache_breakpoint(messages)
 
-    try:
-        while True:
-            with client.messages.stream(
-                model=model,
-                max_tokens=max_tokens,
-                system=system,
-                messages=messages,
-                tools=tools,
-            ) as stream:
-                collected_text = []
-                for text in stream.text_stream:
-                    collected_text.append(text)
-                    if on_text:
-                        on_text(text)
+    while True:
+        with client.messages.stream(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=messages,
+            tools=tools,
+        ) as stream:
+            collected_text = []
+            for text in stream.text_stream:
+                collected_text.append(text)
+                if on_text:
+                    on_text(text)
 
-                response = stream.get_final_message()
+            response = stream.get_final_message()
 
-            messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "assistant", "content": response.content})
 
-            # Track usage for every API call (including tool loops)
-            usage_info = {
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
-            }
-            if hasattr(response.usage, "cache_read_input_tokens"):
-                usage_info["cache_read"] = response.usage.cache_read_input_tokens
-            if hasattr(response.usage, "cache_creation_input_tokens"):
-                usage_info["cache_write"] = response.usage.cache_creation_input_tokens
-            if track_usage_fn:
-                track_usage_fn(usage_info)
+        # Track usage for every API call (including tool loops)
+        usage_info = {
+            "input_tokens": response.usage.input_tokens,
+            "output_tokens": response.usage.output_tokens,
+        }
+        if hasattr(response.usage, "cache_read_input_tokens"):
+            usage_info["cache_read"] = response.usage.cache_read_input_tokens
+        if hasattr(response.usage, "cache_creation_input_tokens"):
+            usage_info["cache_write"] = response.usage.cache_creation_input_tokens
+        if track_usage_fn:
+            track_usage_fn(usage_info)
 
-            if response.stop_reason != "tool_use":
-                full_text = "".join(collected_text)
-                if on_usage:
-                    on_usage(usage_info)
-                # Log cache effectiveness
-                cache_read = usage_info.get("cache_read", 0)
-                cache_write = usage_info.get("cache_write", 0)
-                input_tokens = usage_info.get("input_tokens", 0)
-                if cache_read or cache_write:
-                    print(f"[sdk] cache: {cache_read} read, "
-                          f"{cache_write} write, "
-                          f"{input_tokens - cache_read - cache_write} uncached",
-                          file=sys.stderr, flush=True)
-                return full_text
+        if response.stop_reason != "tool_use":
+            full_text = "".join(collected_text)
+            if on_usage:
+                on_usage(usage_info)
+            # Log cache effectiveness
+            cache_read = usage_info.get("cache_read", 0)
+            cache_write = usage_info.get("cache_write", 0)
+            input_tokens = usage_info.get("input_tokens", 0)
+            if cache_read or cache_write:
+                print(f"[sdk] cache: {cache_read} read, "
+                      f"{cache_write} write, "
+                      f"{input_tokens - cache_read - cache_write} uncached",
+                      file=sys.stderr, flush=True)
+            return full_text
 
-            # Handle tool use
-            tool_results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    if on_tool:
-                        on_tool(block.name, block.input)
-                    result = execute_tool(block.name, block.input)
-                    if on_tool_result:
-                        preview = result if isinstance(result, str) else "[image]"
-                        on_tool_result(block.name, preview)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result,
-                    })
+        # Handle tool use
+        tool_results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                if on_tool:
+                    on_tool(block.name, block.input)
+                result = execute_tool(block.name, block.input)
+                if on_tool_result:
+                    preview = result if isinstance(result, str) else "[image]"
+                    on_tool_result(block.name, preview)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result,
+                })
 
-            messages.append({"role": "user", "content": tool_results})
-    finally:
-        _clear_cache_breakpoint(messages, cache_bp)
+        messages.append({"role": "user", "content": tool_results})
