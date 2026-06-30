@@ -94,13 +94,23 @@ MODEL_CONTEXT_WINDOWS = {
     "claude-3-5-sonnet-20241022": 200_000,
 }
 DEFAULT_CONTEXT_WINDOW = 200_000
-TRIM_RATIO = 0.9
+TRIM_TRIGGER_RATIO = 0.8   # Start trimming at 80% of context window
+TRIM_TARGET_RATIO = 0.4    # Drop down to 40% — big runway before next trim
+
+# Keep old name as alias so nothing breaks
+TRIM_RATIO = TRIM_TRIGGER_RATIO
 
 
 def context_trim_threshold(model: str) -> int:
-    """Return the token count at which rolling trim should start."""
+    """Return the token count at which batch trim triggers."""
     window = MODEL_CONTEXT_WINDOWS.get(model, DEFAULT_CONTEXT_WINDOW)
-    return int(window * TRIM_RATIO)
+    return int(window * TRIM_TRIGGER_RATIO)
+
+
+def context_trim_target(model: str) -> int:
+    """Return the token count to drop down to when trimming."""
+    window = MODEL_CONTEXT_WINDOWS.get(model, DEFAULT_CONTEXT_WINDOW)
+    return int(window * TRIM_TARGET_RATIO)
 
 
 def load_identity(name: str) -> str:
@@ -256,13 +266,19 @@ class QuietEngine:
                       self.model, self.identity_name)
 
     def trim_context(self):
-        """Mechanically drop oldest turns when approaching context limit."""
+        """Batch-drop oldest turns when context hits the trigger threshold.
+
+        Triggers at 80% of context window, drops down to 40%.
+        One cache miss per trim event instead of one per turn.
+        """
         threshold = context_trim_threshold(self.model)
+        target = context_trim_target(self.model)
         _trim_context(
             self.messages, self.model, threshold,
             self.archive_path,
             client=self.client, system=self.system,
             tools=self.tools, backend=self.backend,
+            target=target,
         )
 
     def _estimate_tokens(self) -> int:

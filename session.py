@@ -188,12 +188,22 @@ def save_session(session_path: Path, messages: list,
 def trim_context(messages: list, model: str, threshold: int,
                  archive_path: Path,
                  client=None, system=None, tools=None,
-                 backend: str = "ccode") -> None:
-    """Mechanically drop oldest turns when approaching context limit.
+                 backend: str = "ccode",
+                 target: int = None) -> None:
+    """Batch-drop oldest turns when approaching context limit.
 
+    Triggers at `threshold` and drops messages until context is at or
+    below `target`.  If `target` is not given, defaults to `threshold`
+    (the old behaviour — drop just enough to fit).
+
+    Batch-dropping is cache-friendly: it causes one cache miss at the
+    trim point instead of invalidating the cache every single turn.
     Dropped messages are appended to the archive file so nothing is
     permanently lost — just moved out of active context.
     """
+    if target is None:
+        target = threshold
+
     # Estimate current token count
     def estimate():
         total = 0
@@ -226,7 +236,8 @@ def trim_context(messages: list, model: str, threshold: int,
         return
 
     dropped = []
-    while current > threshold and len(messages) > 2:
+    # Drop until we're at or below TARGET, not just below trigger
+    while current > target and len(messages) > 2:
         dropped.append(messages.pop(0))
         if backend != "ccode" and client:
             try:
