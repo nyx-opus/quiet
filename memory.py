@@ -251,6 +251,154 @@ def search(query: str, top_k: int = 5,
     return results[:top_k]
 
 
+# ── recall (stage 2) ─────────────────────────────────────────
+
+# Stopwords — common words that make poor handles
+_STOPWORDS = frozenset("""
+    a about above after again against all am an and any are aren't as at
+    be because been before being below between both but by can't cannot
+    could couldn't did didn't do does doesn't doing don't down during each
+    few for from further get got had hadn't has hasn't have haven't having
+    he he'd he'll he's her here here's hers herself him himself his how
+    how's i i'd i'll i'm i've if in into is isn't it it's its itself
+    let's me more most mustn't my myself no nor not of off on once only
+    or other ought our ours ourselves out over own same shan't she she'd
+    she'll she's should shouldn't so some such than that that's the their
+    theirs them themselves then there there's these they they'd they'll
+    they're they've this those through to too under until up upon us very
+    was wasn't we we'd we'll we're we've were weren't what what's when
+    when's where where's which while who who's whom why why's will with
+    won't would wouldn't you you'd you'll you're you've your yours
+    yourself yourselves
+    also just like really think things know want going right yeah yes
+    okay sure actually even still well much way something one two make
+    thing good new get got now back time see would could might been
+    already pretty maybe probably thought said say didn't don't
+    hey hi hello thanks thank sorry hmm ah oh ha haha lol nice
+    nyx amy erin true false none today tomorrow yesterday
+    different really looking need doing using going getting
+    here there where everything nothing something anything
+    first last next before after morning evening night
+    always never often sometimes already pretty
+    started working trying building making
+    come welcome honestly basically honestly certainly
+    probably definitely absolutely perhaps simply entirely
+    specific specifically particular particularly
+    means meaning meant interesting question answer
+    exactly important doesn't haven't wouldn't shouldn't
+    whether another remember system around
+    transcripts transcript
+    session sessions message messages response responses
+    conversation conversations context prompt
+    present seems person timer waiting accidentally
+    mentioned discussed explained described
+""".split())
+
+# Speaker tags to strip
+_SPEAKER_TAGS = {"[amy]:", "[nyx]:", "[exchange]:", "[orange]:", "[apple]:"}
+
+
+def _to_superscript(text: str) -> str:
+    """Convert text to Unicode superscript characters.
+
+    Characters without superscript equivalents pass through unchanged.
+    """
+    table = str.maketrans(
+        "abcdefghijklmnoprstuvwxyz0123456789"
+        "ABCDEFGHIJKLMNOPRSTUVWXYZ",
+        "ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ⁰¹²³⁴⁵⁶⁷⁸⁹"
+        "ᴬᴮᶜᴰᴱᶠᴳᴴᴵᴶᴷᴸᴹᴺᴼᴾᴿˢᵀᵁⱽᵂˣʸᶻ"
+    )
+    return text.translate(table)
+
+
+def extract_handles(text: str, n: int = 2) -> list[str]:
+    """Extract the n most distinctive words from a chunk of text.
+
+    Picks proper nouns and technical terms first, then falls back
+    to longest uncommon words. Returns lowercase handles.
+    """
+    import re
+    # Strip speaker tags
+    clean = text
+    for tag in _SPEAKER_TAGS:
+        clean = clean.replace(tag, " ").replace(tag.title(), " ")
+
+    # Tokenise
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_-]*(?:'[a-z]+)?", clean)
+    if not words:
+        return []
+
+    # Score each word: proper nouns and technical terms get priority
+    scored = []
+    for w in words:
+        # Strip possessives and contractions
+        if "'" in w:
+            w = w.split("'")[0]
+        low = w.lower()
+        if low in _STOPWORDS or len(low) < 4:
+            continue
+        score = 0
+        # Proper noun (capitalised, not at sentence start — rough heuristic)
+        if w[0].isupper() and len(w) > 1 and not w.isupper():
+            score += 10
+        # ALL CAPS (acronyms, hardware names like SK6812, MQTT)
+        if w.isupper() and len(w) >= 2:
+            score += 15
+        # Mixed case / technical (camelCase, SK6812, etc)
+        if any(c.isdigit() for c in w):
+            score += 8
+        # Length bonus — longer words tend to be more specific
+        score += min(len(low), 12)
+        scored.append((low, score))
+
+    # Deduplicate, keeping highest score
+    seen = {}
+    for word, score in scored:
+        if word not in seen or score > seen[word]:
+            seen[word] = score
+
+    # Sort by score descending, pick top n unique
+    ranked = sorted(seen.items(), key=lambda x: x[1], reverse=True)
+    return [word for word, _ in ranked[:n]]
+
+
+def recall(query: str, top_k: int = 5, handles_per_chunk: int = 2,
+           min_score: float = 0.35) -> str:
+    """Search memory and return a superscript recall line.
+
+    Given a query (typically the user's latest message), searches
+    the memory store and extracts distinctive handle words from the
+    top results. Returns a superscript-formatted string like:
+
+        ᵐᵉᵐᵒʳʸ ⁱⁿ ʳᵉᵃᶜʰ: Orange · figurine · SK6812
+
+    Returns empty string if no relevant memories found.
+    """
+    results = search(query, top_k=top_k, min_score=min_score)
+    if not results:
+        return ""
+
+    # Extract handles from each result, preserving order
+    all_handles = []
+    seen = set()
+    for r in results:
+        handles = extract_handles(r["text"], n=handles_per_chunk)
+        for h in handles:
+            if h not in seen:
+                seen.add(h)
+                all_handles.append(h)
+
+    if not all_handles:
+        return ""
+
+    # Cap at ~8 handles to keep it small
+    all_handles = all_handles[:8]
+
+    handle_str = " · ".join(all_handles)
+    return _to_superscript(f"memory in reach: {handle_str}")
+
+
 def stats() -> dict:
     """Return basic stats about the memory store."""
     db = _get_db()
@@ -299,6 +447,14 @@ if __name__ == "__main__":
             if len(r['text']) > 300:
                 preview += "..."
             print(f"  {preview}\n")
+
+    elif cmd == "recall":
+        query = sys.argv[2]
+        result = recall(query)
+        if result:
+            print(result)
+        else:
+            print("(no memories surfaced)")
 
     elif cmd == "stats":
         s = stats()

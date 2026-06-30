@@ -421,6 +421,21 @@ class QuietEngine:
         # Add user message
         self.messages.append({"role": "user", "content": user_input})
 
+        # Surface relevant memories as superscript handles
+        try:
+            from memory import recall
+            handles = recall(user_input)
+            if handles:
+                msg = self.messages[-1]
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    msg["content"] = content + "\n" + handles
+                elif isinstance(content, list):
+                    msg["content"].append(
+                        {"type": "text", "text": "\n" + handles})
+        except Exception:
+            pass  # Memory recall is never worth breaking the conversation
+
         # Trim context if needed (all backends)
         self.trim_context()
 
