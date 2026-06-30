@@ -256,6 +256,15 @@ def trim_context(messages: list, model: str, threshold: int,
         with open(archive_path, "a") as f:
             for msg in dropped:
                 f.write(json.dumps(serialise_message(msg)) + "\n")
+        # Ingest dropped messages into vector memory
+        try:
+            from memory import ingest_messages
+            source = archive_path.stem  # e.g. "nyx-dropped"
+            ingest_messages(dropped, source=source)
+        except Exception as exc:
+            import logging
+            logging.getLogger("quiet.session").warning(
+                "Memory ingest failed (non-fatal): %s", exc)
 
 
 
