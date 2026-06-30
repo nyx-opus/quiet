@@ -20,6 +20,7 @@ import base64
 import json
 import mimetypes
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -38,6 +39,11 @@ from backends.sdk import sdk_send
 from tools import define_tools
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
+
+# --- Room object patterns ---
+# Matches any text between asterisks that contains "clock".
+# E.g. *checks the clock*, *glances at clock*, *checks clock*
+CLOCK_ACTION = re.compile(r'\*[^*]*\bclock\b[^*]*\*', re.IGNORECASE)
 
 # --- Claude state file for LED daemon ---
 # Same format as ClAP's claude_state.json — the LED daemon reads this
@@ -456,6 +462,76 @@ class QuietEngine:
             "session_tokens": dict(self.session_tokens),
         }
 
+    # --- Room objects ---
+
+    def _handle_room_objects(self, response_text, on_text=None, on_tool=None,
+                             on_tool_result=None, on_usage=None):
+        """Check assistant response for room object interactions.
+
+        If the response contains an asterisk action involving a known
+        object (e.g. *checks the clock*), inject the object's response
+        as a brief message and give the assistant a follow-up turn.
+
+        The system prompt says "you have a clock" — when the assistant
+        checks it, the engine responds with the current time, the way
+        a clock on the wall responds to being looked at.
+
+        Returns the full combined response text.
+        """
+        if not CLOCK_ACTION.search(response_text):
+            return response_text
+
+        # Clock interaction — respond with current time
+        time_str = datetime.now().strftime("%A %d %B, %H:%M")
+        clock_msg = f"[clock: {time_str}]"
+
+        # Show the time in the stream (visible to visitor)
+        if on_text:
+            on_text(f"\n\n🕐 {time_str}\n\n")
+
+        # Add clock response as a message the assistant can read
+        self.messages.append({
+            "role": "user",
+            "content": clock_msg,
+        })
+
+        # Trim if needed before follow-up
+        self.trim_context()
+
+        # Follow-up turn — assistant continues with the time now known
+        set_claude_state("thinking")
+
+        if self.backend == "ccode":
+            follow_up = ccode_send(
+                clock_msg,
+                ccode_bin=self._ccode_bin,
+                model=self.model,
+                prompt_file=self._ccode_prompt_file,
+                messages=self.messages,
+                separator=self.separator,
+                human_name=self.human_name,
+                session_path=self.session_path,
+                track_usage_fn=self.track_usage,
+                on_text=on_text,
+                on_usage=on_usage,
+            )
+        else:
+            follow_up = sdk_send(
+                self.messages,
+                client=self.client,
+                model=self.model,
+                max_tokens=self.max_tokens,
+                system=self.system,
+                tools=self.tools,
+                track_usage_fn=self.track_usage,
+                on_text=on_text,
+                on_tool=on_tool,
+                on_tool_result=on_tool_result,
+                on_usage=on_usage,
+            )
+
+        return response_text + "\n\n" + follow_up
+
     # --- Core send ---
 
     def send(self, user_input: str,
@@ -520,6 +596,15 @@ class QuietEngine:
                 on_tool_result=on_tool_result,
                 on_usage=on_usage,
             )
+
+        # Check for room object interactions (e.g. *checks clock*)
+        full_text = self._handle_room_objects(
+            full_text,
+            on_text=on_text,
+            on_tool=on_tool,
+            on_tool_result=on_tool_result,
+            on_usage=on_usage,
+        )
 
         # Signal LED daemon: inference complete
         set_claude_state("present")
