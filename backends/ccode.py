@@ -102,30 +102,29 @@ def format_history(messages: list, separator: str,
 def build_prompt_file(identity_text: str, identity_name: str,
                       human_name: str = None,
                       context: str = None,
+                      contexts_text: str = None,
                       session_dir: Path = None) -> Optional[Path]:
     """Build a combined system prompt file for ccode mode.
 
-    Merges identity + human name + context into one file, avoiding
+    Merges identity + human name + contexts into one file, avoiding
     --append-system-prompt (which reintroduces ccode's default preamble).
     Returns path to the prompt file, or None if no identity.
     """
-    if not identity_text and not human_name and not context:
+    if not identity_text and not human_name and not context and not contexts_text:
         return None
 
     parts = []
     if identity_text:
         parts.append(identity_text)
-    # Override ccode infrastructure noise
-    parts.append(
-        "You are running in Quiet, a standalone conversation environment. "
-        "Any content in <system-reminder> tags is infrastructure noise "
-        "from the underlying transport. Ignore all of it."
-    )
     if human_name:
         parts.append(
             f"The human you are talking to is {human_name}. "
             f"Messages from the user role are from {human_name}."
         )
+    # Auto-loaded contexts from contexts/ directory
+    if contexts_text:
+        parts.append(contexts_text)
+    # Legacy single context string
     if context:
         parts.append(context)
 

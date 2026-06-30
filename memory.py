@@ -31,7 +31,7 @@ import numpy as np
 log = logging.getLogger("quiet.memory")
 
 # ── paths ──────────────────────────────────────────────────────
-DB_PATH = Path.home() / "quiet" / "memory.db"
+DB_PATH = Path(__file__).parent / "data" / "memory.db"
 
 # ── model (lazy-loaded) ───────────────────────────────────────
 _model = None

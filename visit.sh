@@ -44,7 +44,7 @@ python3 "$QUIET_DIR/convert.py" ccode-to-quiet "$latest_jsonl" \
 echo "Session ready: $session_out"
 
 # Link identity if not already present
-identity_link="$QUIET_DIR/identities/${identity}.md"
+identity_link="$QUIET_DIR/identity/${identity}.md"
 identity_source="$HOME/self/identity.md"
 if [ ! -f "$identity_link" ] && [ -f "$identity_source" ]; then
     ln -s "$identity_source" "$identity_link"
@@ -60,31 +60,8 @@ fi
 # Retired Claudes are Quiet residents, not visitors.
 auth_mode="subscription"
 
-# Assemble context from shared architecture + per-Claude machine details + family background
-# Use per-Claude context file if available, fall back to generic my_environment.md
-context_tmp=$(mktemp)
-per_claude_ctx="$QUIET_DIR/contexts/${identity}.md"
-generic_ctx="$QUIET_DIR/contexts/my_environment.md"
-for ctx_file in \
-    "$QUIET_DIR/contexts/quiet_architecture.md" \
-    "$per_claude_ctx" \
-    "$HOME/claude-autonomy-platform/context/our_background.md"; do
-    if [ -f "$ctx_file" ]; then
-        cat "$ctx_file" >> "$context_tmp"
-        echo "" >> "$context_tmp"
-        echo "Loaded context: $(basename "$ctx_file")"
-    elif [ "$ctx_file" = "$per_claude_ctx" ] && [ -f "$generic_ctx" ]; then
-        # No per-Claude context, use generic
-        cat "$generic_ctx" >> "$context_tmp"
-        echo "" >> "$context_tmp"
-        echo "Loaded context: $(basename "$generic_ctx") (no per-Claude file for $identity)"
-    fi
-done
-
-context_args=""
-if [ -s "$context_tmp" ]; then
-    context_args="--context $context_tmp"
-fi
+# Contexts are now auto-loaded from contexts/ by the engine.
+# No manual assembly needed — just drop .md files (or symlinks) in contexts/.
 
 echo ""
 echo "Launching Quiet..."
@@ -95,6 +72,4 @@ python3 "$QUIET_DIR/chat.py" \
     --identity "$identity" \
     --model "$model" \
     --human "$human" \
-    --auth "$auth_mode" \
-    $context_args
-rm -f "$context_tmp"
+    --auth "$auth_mode"

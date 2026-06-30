@@ -44,12 +44,15 @@ Bridges Discord to Quiet sessions:
 - Ambient channels (messages go to transcripts)
 - Schedule-aware message handling
 
+### Vector Memory (`memory.py`)
+Auto-ingest dropped conversation turns into a local embedding store (MiniLM).
+Search by cosine similarity. Recall handles surface as superscript keywords
+before each turn — associative, not directive.
+
 ### Utilities
 - `convert.py` - Bidirectional converter between Claude Code and Quiet formats
-- `rag_cli.py` - RAG memory search/store via bash commands
 - `pricing.py` - Token counting and cost estimation
 - `config_reader.py` - Configuration file handling
-- `generate_discord_config.py` - Creates Discord channel configurations
 
 ## Data Flow
 
@@ -73,12 +76,15 @@ Bridges Discord to Quiet sessions:
 ```
 quiet/
 ├── *.py                 # Core Python modules
-├── identities/          # System prompt files (<name>.md)
-├── contexts/            # Shared context files
-├── archives/            # Completed/trimmed sessions
-├── transcripts/         # Discord channel transcripts
+├── identity/            # Identity files (gitignored except quiet-system-prompt.md)
+├── contexts/            # Context files — auto-loaded (gitignored except shared docs)
+├── data/                # Runtime data — memory.db, state (gitignored except .gitkeep)
+├── backends/            # API backends (sdk.py, ccode.py)
+├── services/            # Systemd units and setup
+├── config/              # Configuration templates
 ├── docs/                # Documentation
-└── README.md            # User guide
+├── static/              # Web UI assets
+└── tests/               # Test suite
 ```
 
 ## Key Design Decisions

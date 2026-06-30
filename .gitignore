@@ -1,21 +1,47 @@
+# Python
 __pycache__/
 *.pyc
 .env
-archives/
-archive/
 venv/
 .venv/
+
+# Runtime data — per-machine, not shared
 sessions/
+archives/
+archive/
 ledger/
+logs/
 inbox/
 transcripts/
-contexts/my_environment.md
+
+# Data directory — .gitkeep only
+data/*
+!data/.gitkeep
+
+# Contexts — gitignore everything except shared/tracked files
+# Each machine has its own environment, visitor contexts, and notes-to-self.
+# Shared architecture docs are tracked; everything else is local.
+contexts/*
+!contexts/quiet_architecture.md
+!contexts/my_environment_template.md
+
+# Identity — gitignore everything except the Quiet system prompt.
+# Each Claude's identity.md is a symlink to ~/self/identity.md (local).
+# Visitor identity files are per-machine.
+identity/*
+!identity/quiet-system-prompt.md
+
+# Config — templates tracked, live config local
 config/quiet_config.txt
 config/discord_config.json
+
+# Services — templates tracked, generated units local
+services/*.service
+services/*.timer
+!services/*.template
+
+# Other per-machine files
 discord_config.json
 unread_channels.json
-logs/
-services/*.service
 static/custom.css
-memory.db
-data/claude_state.json
+rag.db

@@ -69,7 +69,8 @@ def set_claude_state(state: str, dnd: bool = False):
     STATE_FILE.write_text(json.dumps(data, indent=2))
 
 ARCHIVE_DIR = Path(__file__).parent / "archives"
-IDENTITY_DIR = Path(__file__).parent / "identities"
+IDENTITY_DIR = Path(__file__).parent / "identity"
+CONTEXTS_DIR = Path(__file__).parent / "contexts"
 SESSION_DIR = Path(__file__).parent / "sessions"
 LEDGER_DIR = Path(__file__).parent / "ledger"
 DEFAULT_MODEL = "claude-sonnet-4-20250514"
@@ -114,10 +115,39 @@ def context_trim_target(model: str) -> int:
 
 
 def load_identity(name: str) -> str:
+    """Load identity by name.  Also appends quiet-system-prompt.md if present."""
+    parts = []
     path = IDENTITY_DIR / f"{name}.md"
     if path.exists():
-        return path.read_text()
-    return ""
+        # Follow symlinks (identity.md → ~/self/identity.md)
+        parts.append(path.read_text())
+    prompt_path = IDENTITY_DIR / "quiet-system-prompt.md"
+    if prompt_path.exists():
+        parts.append(prompt_path.read_text())
+    return "\n\n".join(parts)
+
+
+def load_contexts() -> str:
+    """Auto-load all .md files from contexts/ and combine them.
+
+    Files are sorted alphabetically for deterministic ordering.
+    The combined text becomes a cached block in the system prompt,
+    sitting between identity and conversation.
+
+    Supports symlinks (e.g. family.md → /mnt/file_server/Shared/family.md).
+    """
+    if not CONTEXTS_DIR.exists():
+        return ""
+    parts = []
+    for md in sorted(CONTEXTS_DIR.glob("*.md")):
+        try:
+            text = md.read_text().strip()
+            if text:
+                parts.append(text)
+        except (OSError, PermissionError):
+            # Broken symlink or unreadable file — skip silently
+            pass
+    return "\n\n---\n\n".join(parts)
 
 
 def load_ambient_image(path: str) -> dict:
@@ -141,6 +171,16 @@ def build_system_prompt(identity_text: str, human_name: str = None,
                         system_prefix: str = None,
                         ambient_images: list = None,
                         context: str = None) -> list:
+    """Build the system prompt block list.
+
+    Order (each block is a separate content element):
+      1. system_prefix (if any — e.g. ccode preamble)
+      2. identity text (cached — changes rarely)
+      3. human name declaration
+      4. combined contexts (cached — changes rarely)
+      5. legacy single context string (for callers not yet using auto-load)
+      6. ambient image preamble + images
+    """
     blocks = []
     if system_prefix:
         blocks.append({"type": "text", "text": system_prefix})
@@ -153,6 +193,14 @@ def build_system_prompt(identity_text: str, human_name: str = None,
             "text": f"The human you are talking to is {human_name}. "
                     f"Messages from the user role are from {human_name}.",
         })
+
+    # Auto-loaded contexts from contexts/ directory
+    contexts_text = load_contexts()
+    if contexts_text:
+        blocks.append({"type": "text", "text": contexts_text,
+                        "cache_control": {"type": "ephemeral"}})
+
+    # Legacy single context string (from --context flag or config)
     if context:
         blocks.append({"type": "text", "text": context})
     if ambient_images:
@@ -209,9 +257,11 @@ class QuietEngine:
                 else None
             )
             identity_text = load_identity(identity) if identity else ""
+            contexts_text = load_contexts()
             self._ccode_prompt_file = build_prompt_file(
                 identity_text, identity,
                 human_name=human_name, context=context,
+                contexts_text=contexts_text,
                 session_dir=SESSION_DIR,
             )
             self.tools = []  # ccode manages its own tools

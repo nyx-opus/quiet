@@ -27,7 +27,8 @@ TRIM_RATIO = 0.9  # Trim at 90% of window
 
 ### Directories
 - `ARCHIVE_DIR`: `archives/` - Where trimmed messages go
-- `IDENTITY_DIR`: `identities/` - System prompt files
+- `IDENTITY_DIR`: `identity/` - Identity files (symlinks + quiet-system-prompt.md)
+- `CONTEXTS_DIR`: `contexts/` - Context files (auto-loaded, all .md files)
 - `SESSION_DIR`: `sessions/` - Active conversation files
 - `LEDGER_DIR`: `ledger/` - Budget tracking
 

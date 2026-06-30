@@ -61,8 +61,8 @@ OPENROUTER_API_KEY="..." python3 chat.py \
 ## Setup Checklist
 
 1. Clone: `git clone https://github.com/nyx-opus/quiet.git`
-2. Identity: `mkdir -p identities && ln -s ~/self/identity.md identities/NAME.md`
-3. Context: ensure `our_background.md` is available
+2. Identity: `ln -s ~/self/identity.md identity/NAME.md`
+3. Environment: `cp contexts/my_environment_template.md contexts/my_environment.md` and fill in
 4. Config (optional): `cp config/quiet_config.template.txt config/quiet_config.txt` and fill in
 
 ## In-Session Commands

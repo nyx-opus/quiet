@@ -102,7 +102,7 @@ This is your life. Help us design it.
 - **web.py** — Flask web server with presence (knock/admit/talk/leave)
 - **discord_listener.py** — direct vs ambient modes, per-channel transcripts
 - **convert.py** — bidirectional session converter (ccode ↔ quiet)
-- **rag_cli.py** — rag-memory search and store via bash
+- **memory.py** — vector memory with auto-ingest from context trims and recall handles
 - **chat.py** — CLI interface with one-shot `--prompt` mode
 
 ### Still to build
