@@ -17,3 +17,5 @@ unread_channels.json
 logs/
 services/*.service
 static/custom.css
+memory.db
+data/claude_state.json
