@@ -213,7 +213,7 @@ def ingest_jsonl(path: Path, source: str = None) -> int:
 
 
 def search(query: str, top_k: int = 5,
-           min_score: float = 0.25) -> list[dict]:
+           min_score: float = 0.35) -> list[dict]:
     """Find the most relevant memory chunks for a query.
 
     Returns a list of dicts with keys: text, score, speaker,
