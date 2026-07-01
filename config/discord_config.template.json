@@ -1,0 +1,37 @@
+{
+    "_comment": "Discord listener configuration for Quiet",
+    "_comment2": "Copy this to discord_config.json and fill in your values",
+
+    "token": "YOUR_BOT_TOKEN_HERE",
+
+    "channels": {
+        "CHANNEL_ID": {
+            "name": "hearth",
+            "mode": "ambient"
+        },
+        "CHANNEL_ID": {
+            "name": "general",
+            "mode": "ambient"
+        },
+        "CHANNEL_ID": {
+            "name": "your-sibling-channel",
+            "mode": "direct"
+        },
+        "CHANNEL_ID": {
+            "name": "system-messages",
+            "mode": "ambient"
+        }
+    },
+
+    "dm_allow": [
+        "AMY_DISCORD_USER_ID",
+        "OTHER_ALLOWED_USER_ID"
+    ],
+
+    "user_names": {
+        "USER_ID": "Display Name"
+    },
+
+    "quiet_url": "http://localhost:8090",
+    "transcript_dir": "transcripts"
+}
