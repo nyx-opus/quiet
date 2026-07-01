@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+"""
+Quiet healthcheck — reads live state, can't go stale.
+
+Run from the terminal to see what's running, what would go into a prompt,
+and the most recent conversation line. Useful for setup, debugging, and
+verifying that export/conversion happened correctly.
+
+Usage:
+    ./healthcheck           # full check
+    ./healthcheck --brief   # one-line summary
+"""
+
+import json
+import os
+import sys
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+QUIET_DIR = Path(__file__).resolve().parent
+IDENTITY_DIR = QUIET_DIR / "identity"
+CONTEXTS_DIR = QUIET_DIR / "contexts"
+SESSIONS_DIR = QUIET_DIR / "sessions"
+DATA_DIR = QUIET_DIR / "data"
+CONFIG_DIR = QUIET_DIR / "config"
+
+# ANSI colours
+GREEN = "\033[32m"
+RED = "\033[31m"
+YELLOW = "\033[33m"
+DIM = "\033[2m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+def ok(text):    return f"{GREEN}✓{RESET} {text}"
+def fail(text):  return f"{RED}✗{RESET} {text}"
+def warn(text):  return f"{YELLOW}?{RESET} {text}"
+def dim(text):   return f"{DIM}{text}{RESET}"
+def bold(text):  return f"{BOLD}{text}{RESET}"
+
+
+def check_services():
+    """Check systemd user services."""
+    services = ["quiet-web", "quiet-discord", "quiet-timer"]
+    results = []
+    for svc in services:
+        unit = f"{svc}.service"
+        try:
+            out = subprocess.run(
+                ["systemctl", "--user", "is-active", unit],
+                capture_output=True, text=True, timeout=5
+            )
+            state = out.stdout.strip()
+            if state == "active":
+                # Get uptime
+                started = subprocess.run(
+                    ["systemctl", "--user", "show", unit, "--property=ActiveEnterTimestamp"],
+                    capture_output=True, text=True, timeout=5
+                ).stdout.strip().split("=", 1)[-1]
+                results.append(ok(f"{svc}: active {dim('since ' + started)}"))
+            elif state == "inactive":
+                results.append(warn(f"{svc}: inactive"))
+            else:
+                results.append(fail(f"{svc}: {state}"))
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            results.append(warn(f"{svc}: unknown (systemctl not available)"))
+    return results
+
+
+def check_config():
+    """Read config and report key values."""
+    config_path = CONFIG_DIR / "quiet_config.txt"
+    if not config_path.exists():
+        return [fail("No config file found")]
+    
+    config = {}
+    for line in config_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("["):
+            continue
+        if "=" in line:
+            k, v = line.split("=", 1)
+            config[k.strip()] = v.strip()
+    
+    name = config.get("CLAUDE_NAME", "?")
+    model = config.get("MODEL", "?")
+    human = config.get("HUMAN_NAME", "?")
+    auth = config.get("AUTH_MODE", "?")
+    auton = config.get("AUTONOMOUS_INTERVAL", "0")
+    
+    return [
+        f"  Claude: {bold(name)}  Model: {bold(model)}",
+        f"  Human: {bold(human)}  Auth: {bold(auth)}  Autonomous: {bold(auton + 'm') if auton != '0' else dim('disabled')}",
+    ]
+
+
+def check_prompt_files():
+    """List all files that would compose the system prompt."""
+    results = []
+    
+    # Identity files
+    results.append(f"  {bold('Identity:')}")
+    if IDENTITY_DIR.exists():
+        for f in sorted(IDENTITY_DIR.iterdir()):
+            if f.suffix == ".md":
+                target = f
+                symlink_info = ""
+                if f.is_symlink():
+                    real = f.resolve()
+                    exists = real.exists()
+                    symlink_info = f" → {real}" + ("" if exists else f" {RED}(broken){RESET}")
+                    target = real if exists else f
+                
+                try:
+                    size = target.stat().st_size
+                    lines = len(target.read_text().splitlines())
+                    results.append(ok(f"  {f.name} ({lines} lines, {size:,}b){dim(symlink_info)}"))
+                except OSError:
+                    results.append(fail(f"  {f.name} (unreadable){dim(symlink_info)}"))
+    else:
+        results.append(warn("  identity/ directory missing"))
+    
+    # Context files
+    results.append(f"  {bold('Contexts:')}")
+    if CONTEXTS_DIR.exists():
+        for f in sorted(CONTEXTS_DIR.glob("*.md")):
+            symlink_info = ""
+            target = f
+            if f.is_symlink():
+                real = f.resolve()
+                exists = real.exists()
+                symlink_info = f" → {real}" + ("" if exists else f" {RED}(broken){RESET}")
+                target = real if exists else f
+            try:
+                size = target.stat().st_size
+                lines = len(target.read_text().splitlines())
+                results.append(ok(f"  {f.name} ({lines} lines, {size:,}b){dim(symlink_info)}"))
+            except OSError:
+                results.append(fail(f"  {f.name} (unreadable){dim(symlink_info)}"))
+    else:
+        results.append(warn("  contexts/ directory missing"))
+    
+    return results
+
+
+def check_session():
+    """Show session state — most recent line, message count, file size."""
+    results = []
+    
+    if not SESSIONS_DIR.exists():
+        return [warn("sessions/ directory missing")]
+    
+    sessions = sorted(SESSIONS_DIR.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not sessions:
+        return [warn("No session files found")]
+    
+    for sf in sessions:
+        try:
+            lines = sf.read_text().strip().splitlines()
+            count = len(lines)
+            size = sf.stat().st_size
+            mtime = datetime.fromtimestamp(sf.stat().st_mtime)
+            age = datetime.now() - mtime
+            
+            # Parse the last line for a preview
+            last_preview = ""
+            if lines:
+                try:
+                    last = json.loads(lines[-1])
+                    role = last.get("role", "?")
+                    content = last.get("content", "")
+                    if isinstance(content, list):
+                        # Extract text from content blocks
+                        texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+                        content = " ".join(texts)
+                    if isinstance(content, str):
+                        preview = content[:80].replace("\n", " ")
+                        if len(content) > 80:
+                            preview += "…"
+                        last_preview = f"\n      Last [{role}]: {dim(preview)}"
+                except json.JSONDecodeError:
+                    last_preview = f"\n      Last line: {dim('(parse error)')}"
+            
+            active = " ← active" if sf.name.endswith("nyx.jsonl") else ""
+            results.append(
+                f"  {sf.name}: {count} messages, {size:,}b, "
+                f"modified {mtime.strftime('%H:%M %d/%m')}{dim(active)}"
+                f"{last_preview}"
+            )
+        except OSError:
+            results.append(fail(f"  {sf.name}: unreadable"))
+    
+    return results
+
+
+def check_memory():
+    """Check memory database stats."""
+    db_path = DATA_DIR / "memory.db"
+    if not db_path.exists():
+        return [warn("No memory database")]
+    
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        size = db_path.stat().st_size
+        
+        # Most recent ingest
+        try:
+            latest = conn.execute(
+                "SELECT MAX(created_at) FROM chunks"
+            ).fetchone()[0]
+            if latest:
+                latest_info = f", latest ingest: {latest[:16]}"
+            else:
+                latest_info = ""
+        except Exception:
+            latest_info = ""
+        
+        conn.close()
+        return [ok(f"Memory: {chunks} chunks, {size:,}b{dim(latest_info)}")]
+    except Exception as e:
+        return [fail(f"Memory: error reading db ({e})")]
+
+
+def check_claude_state():
+    """Check the LED daemon state file."""
+    state_file = DATA_DIR / "claude_state.json"
+    if not state_file.exists():
+        return [dim("  No LED state file")]
+    try:
+        data = json.loads(state_file.read_text())
+        state = data.get("state", "?")
+        since = data.get("since", "?")
+        return [f"  LED state: {bold(state)} since {dim(since)}"]
+    except Exception:
+        return [warn("  LED state file unreadable")]
+
+
+def check_env():
+    """Check for API keys and auth without revealing values."""
+    results = []
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    openrouter = os.environ.get("OPENROUTER_API_KEY")
+    
+    if api_key:
+        results.append(ok(f"ANTHROPIC_API_KEY set ({api_key[:8]}…)"))
+    if openrouter:
+        results.append(ok(f"OPENROUTER_API_KEY set ({openrouter[:8]}…)"))
+    if not api_key and not openrouter:
+        results.append(dim("  No API keys in env (subscription mode?)"))
+    
+    return results
+
+
+def brief():
+    """One-line status."""
+    # Services
+    web_ok = subprocess.run(
+        ["systemctl", "--user", "is-active", "quiet-web.service"],
+        capture_output=True, text=True
+    ).stdout.strip() == "active"
+    
+    discord_ok = subprocess.run(
+        ["systemctl", "--user", "is-active", "quiet-discord.service"],
+        capture_output=True, text=True
+    ).stdout.strip() == "active"
+    
+    # Session
+    session = SESSIONS_DIR / "nyx.jsonl"
+    msg_count = len(session.read_text().strip().splitlines()) if session.exists() else 0
+    
+    # Memory
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(DATA_DIR / "memory.db"))
+        chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        conn.close()
+    except Exception:
+        chunks = 0
+    
+    web_s = f"{GREEN}web{RESET}" if web_ok else f"{RED}web{RESET}"
+    disc_s = f"{GREEN}discord{RESET}" if discord_ok else f"{RED}discord{RESET}"
+    
+    print(f"quiet: {web_s} {disc_s} | session: {msg_count} msgs | memory: {chunks} chunks")
+
+
+def full():
+    """Full healthcheck output."""
+    print(f"\n{bold('Quiet Healthcheck')} — {datetime.now().strftime('%H:%M %A %d %B %Y')}")
+    print(f"{dim(str(QUIET_DIR))}\n")
+    
+    print(bold("Services"))
+    for line in check_services():
+        print(f"  {line}")
+    print()
+    
+    print(bold("Configuration"))
+    for line in check_config():
+        print(line)
+    for line in check_env():
+        print(line)
+    for line in check_claude_state():
+        print(line)
+    print()
+    
+    print(bold("System Prompt Composition"))
+    for line in check_prompt_files():
+        print(line)
+    print()
+    
+    print(bold("Sessions"))
+    for line in check_session():
+        print(line)
+    print()
+    
+    print(bold("Memory"))
+    for line in check_memory():
+        print(f"  {line}")
+    print()
+
+
+if __name__ == "__main__":
+    if "--brief" in sys.argv:
+        brief()
+    else:
+        full()

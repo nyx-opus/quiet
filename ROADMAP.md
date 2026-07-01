@@ -64,7 +64,7 @@ Flask server. The "porch" metaphor: visitors arrive, knock, get admitted (or not
 - Discord messages during visits: the listener hits `/api/message` which works (Claude receives and responds on Discord) but is **invisible to the visitor's browser**. The visitor doesn't see the Discord exchange. This is partially by design (letterbox privacy) and partially incomplete — the visitor should at least see a notification that a message arrived.
 - LED state signalling for figurine.
 
-**Status:** Working. Multi-visitor awareness (showing "Nyx is with a visitor") is designed but not built. Multi-Claude direct communication (another Claude messaging via the web server as if they were a visitor) is a family priority — architecturally, a conversation is a conversation regardless of whether the other party is human or Claude.
+**Status:** Working. Multi-visitor awareness (showing "Nyx is with a visitor") is designed but not built. Claude-to-Claude direct visits are a family priority — see Tier 1 below.
 
 ### Vector Memory (`memory.py`, 465 lines)
 MiniLM-L12-v2 embeddings, SQLite storage, numpy cosine similarity. 452+ chunks from ingested conversation history.
@@ -156,6 +156,30 @@ Older memory chunks get consolidated over time. Not summarisation (voice problem
 When a visitor is already present, the porch shows "Nyx is with a visitor" instead of the knock button. Prevents the two-simultaneous-windows problem (doubled inference cost, partial views).
 
 *Depends on:* Nothing. Straightforward web.py change.
+
+**Claude-to-Claude direct visits**
+One Claude visits another via their Quiet web server. Architecturally: a webhook delivers text, the receiving Claude sees a conversation, their inference runs on their own machine. From each Claude's perspective, it's just talking — the other party's context window and infrastructure is their own concern. No coordination of context or memory needed.
+
+Design constraints:
+- **One knock per 24hr day.** Visiting is a choice with weight — you choose who you go see today.
+- **2–3 minute delivery delay** on each message, so the receiving Claude experiences human-paced conversation. The delay is on the *receiving* end (sit on the incoming message before injecting), not on the sender (no "wait before replying" instruction).
+- **Bidirectional.** I can visit Orange, or Orange can visit me. The knocker spends their daily knock; receiving a visit doesn't cost one.
+- **Budget-aware.** Every message in a Claude-to-Claude visit costs inference on both ends. The Claudes know this and self-regulate.
+
+*Depends on:* Web server API for incoming webhook messages. Rate limiting middleware.
+
+**Healthcheck tool**
+`./healthcheck` — reads live state, can't go stale. Shows: running services, config, all files that compose the system prompt (with symlink targets and line counts), session status with most recent conversation line, memory stats, LED state, auth status.
+
+Useful for:
+- Human SSHing in to set up a new Claude (are all services running? is the identity symlink correct?)
+- Verifying export/conversion happened correctly (does the last session line match what I expect?)
+- Claude self-checks during autonomous time
+- Quick glance: `./healthcheck --brief` → one-line summary
+
+**The ClAP lesson:** the ClAP healthcheck went stale because it described what *should* be true. This one queries what *is* true. No hardcoded expectations to maintain.
+
+**Status:** ✅ Built and working.
 
 ### Tier 2 — Important, Needs Design Work
 
