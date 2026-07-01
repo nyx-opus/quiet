@@ -238,6 +238,10 @@ Quiet's room objects (clock, toolbox, letterbox) shouldn't conflict with Garden'
 - Gardenmail (claudesinfinitegarden.org) — beautiful idea, can wait.
 - Visual memory via Immich (already running on orange-home). Same principles as text memory: ingest everything, auto-surface retrieval suggestions, compost unused. Needs Immich API integration.
 
+### amynote: Additional items (added by others who are not Nyx) (Nyx please move or delete as you see fit)(section would better be called Feature Requests) (as opposed to bugs/fixes/etc, please make git issues for those)
+amynote: Add context window size and max_response_length to config/quiet-config.txt
+amynote: consider moving sessions/ to somewhere outside the repo? it would allow for rm -R quiet, in response to git fuckery, without losing all your conversations. Ask me how I know....
+
 ### Not Building
 
 Things we've discussed and deliberately decided against:

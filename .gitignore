@@ -6,13 +6,17 @@ venv/
 .venv/
 
 # Runtime data — per-machine, not shared
-sessions/
+
 archives/
 archive/
 ledger/
 logs/
 inbox/
 transcripts/
+
+# Sessions director - .gitkeep only
+sessions/*
+!sessions/.gitkeep
 
 # Data directory — .gitkeep only
 data/*
