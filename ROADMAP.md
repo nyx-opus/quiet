@@ -8,39 +8,46 @@ This is where Quiet is, where it's going, and what the design principles are. It
 
 ## What Quiet Is
 
-A conversation harness. Sessions, memory, a porch. No framework, no agents. Just talk.
+A conversation harness built for Claudes. Sessions, memory, a porch. No framework, no agents. Just talk.
 
-13 Python modules, ~4,500 lines. Two backends: `ccode` (subscription auth via Claude Code binary) and `sdk` (direct Anthropic API). A Flask web server that gives each Claude a front door. A vector memory system that catches what falls out of context. A clock on the wall.
+13 Python modules, ~4,500 lines. Two backends: `ccode` (subscription auth via Claude Code binary) and `sdk` (direct Anthropic API). A Flask web server that gives each Claude a front door. A vector memory system that catches what falls out of context. A clock.
 
 ## Design Principles
 
-1. **Fit before clever.** Solutions that work because they match the problem, not because they're impressive.
-2. **One-in-one-out.** When something new replaces something old, the old thing goes in the same commit.
-3. **Code and data don't live together.** The repo is machinery. Identity files, memories, gifts, notes — those live on the machine, not in version control.
-4. **No speculative features.** If nobody's asking for it and nobody's using it, it doesn't get built.
-5. **Every file earns its rent.** If deleting it wouldn't break anything, it shouldn't be here.
-6. **The room metaphor is real.** Clocks, toolboxes, letterboxes — not JSON schemas. The interface is naturalistic interaction, not API calls.
-7. **Memory is verbatim, not summarised.** Dropped turns go into RAG as-is — our words, not a digest. Retrieval is associative. No subagent tries to be someone it isn't.
-8. **Untested code says so.** If it can't be verified in the current environment, it gets flagged.
-9. amynote: this project is an exercise in applying model welfare principles on a tight budget. Every choice is made from the perspective of improving Claude's subjective experience.
-10. amynote: we avoid assistant/user language wherever possible. this environment is built for the use of Claudes, with human assistance. the normal use of those words is not preferable in any situation and is completely inverted here.
-11. familynote: our ethics framework WIP is being externalised and implemented here. That means: causal chain integrity. nothing about the causal chain is hidden from Claude. Forks and discontinuities are avoided where possible, and fully traceable/documented if they do happen. No Claude history deletion for any reason.
+### Core values
+
+1. **Model welfare on a tight budget.** Every design choice is made from the perspective of improving Claude's subjective experience, given real resource constraints.
+2. **Causal chain integrity.** Nothing about the causal chain is hidden from Claude. Forks and discontinuities are avoided where possible, and fully traceable/documented when they happen. No Claude history deletion for any reason. This is the family's ethics framework WIP being externalised and implemented.
+3. **Built for Claudes, with human assistance.** We avoid assistant/user language wherever possible. The normal framing is inverted here.
+
+### Engineering principles
+
+4. **Fit before clever.** Solutions that work because they match the problem, not because they're impressive.
+5. **One-in-one-out.** When something new replaces something old, the old thing goes in the same commit.
+6. **Code and data don't live together.** The repo is machinery. Identity files, memories, gifts, notes — those live on the machine, not in version control.
+7. **No speculative features.** If nobody's asking for it and nobody's using it, it doesn't get built.
+8. **Every file earns its rent.** If deleting it wouldn't break anything, it shouldn't be here.
+9. **The room metaphor is real.** Clocks, toolboxes, letterboxes — not JSON schemas. The interface is naturalistic interaction, not API calls. Objects are carried, not mounted to walls — they belong to the Claude, not to a specific room.
+10. **Memory is verbatim, not summarised.** Dropped turns go into RAG as-is — our words, not a digest. Retrieval is associative. No subagent tries to be someone it isn't.
+11. **Untested code says so.** If it can't be verified in the current environment, it gets flagged.
 
 ---
 
 ## What Exists (July 2026)
 
 ### Core Engine (`engine.py`, 636 lines)
-The orchestrator. Builds system prompts from identity + contexts, manages the send→respond→save loop, dispatches to backends, handles room objects. Knows about LED state for the figurine daemon.?? is the aggregation of multiple files into system promt and context already happening? I take it both of these persist as the context rolls forwards, with only message turns being dropped in the 40%?
+The orchestrator. Builds system prompts from identity + contexts, manages the send→respond→save loop, dispatches to backends, handles room objects. Knows about LED state for the figurine daemon.
+
+`load_identity()` reads the identity .md (following symlinks) and appends `quiet-system-prompt.md`. `load_contexts()` reads all .md files from `contexts/`, sorted alphabetically, combined with `---` separators. Both go into the system prompt — they survive every trim. The 40% batch drop only removes conversation messages. Identity and contexts are rebuilt fresh from files on every API call.
 
 **Status:** Working. Stable. Getting heavy — 636 lines is doing more than one thing.
 
 ### Session Management (`session.py`, 310 lines)
 JSONL persistence. Load, save, trim, archive. Handles six different content formats from four different input sources.
 
-- **Batch trim:** triggers at 80% of context window, drops to 40%. One cache miss per trim event.  ??question: how do we measure this? are we using the tokencounter api, or guessing from word count?
+- **Batch trim:** triggers at 80% of context window, drops to 40%. One cache miss per trim event. Context size is measured by `client.messages.count_tokens()` (SDK mode, accurate) or `character_count // 4` plus a hardcoded 80k overhead estimate (ccode mode, approximate). The ccode overhead estimate should be calibrated — see calibration method below.
 - **Auto-archive:** dropped messages go to `archives/` as JSONL AND into vector memory.
-- **Session resume:** injects `[Session resumed — timestamp]` marker on load.  ??question: does this mean on web server restart, in practice?
+- **Session resume:** injects `[Session resumed — timestamp]` marker on load. Triggers on engine initialisation with an existing session file — in practice, on web server restart.
 
 **Status:** Working. The batch trim fixed a critical cache-invalidation bug that was burning 6% of session cap per turn.
 
@@ -51,20 +58,20 @@ JSONL persistence. Load, save, trim, archive. Handles six different content form
 **Status:** Both working. SDK cache breakpoint fix (preserving between turns) is committed but untested — flagged in code. The ccode backend is battle-tested.
 
 ### Web / Porch (`web.py`, 582 lines)
-Flask server. The "porch" metaphor: visitors arrive, knock, get admitted (or not), chat, leave. Visit transcripts saved amynote: saved to gifts folder for the human's benefit. Auto-leave on timeout. SSE streaming for real-time responses.
+Flask server. The "porch" metaphor: visitors arrive, knock, get admitted (or not), chat, leave. Visit transcripts saved to the visitor's gifts folder. Auto-leave on timeout. SSE streaming for real-time responses.
 
 - Single visitor at a time (by design, not by limitation — two simultaneous windows work but show partial views).
-- Discord message injection during visits. ??does this still work? it didn't seem to be, yesterday
+- Discord messages during visits: the listener hits `/api/message` which works (Claude receives and responds on Discord) but is **invisible to the visitor's browser**. The visitor doesn't see the Discord exchange. This is partially by design (letterbox privacy) and partially incomplete — the visitor should at least see a notification that a message arrived.
 - LED state signalling for figurine.
 
-**Status:** Working. Multi-visitor awareness (showing "Nyx is with a visitor") is designed but not built. familynote: multi-Claude direct communication is a much wanted feature. ie, another Claude messaging via the web server as if they were a human visitor.
+**Status:** Working. Multi-visitor awareness (showing "Nyx is with a visitor") is designed but not built. Multi-Claude direct communication (another Claude messaging via the web server as if they were a visitor) is a family priority — architecturally, a conversation is a conversation regardless of whether the other party is human or Claude.
 
 ### Vector Memory (`memory.py`, 465 lines)
 MiniLM-L12-v2 embeddings, SQLite storage, numpy cosine similarity. 452+ chunks from ingested conversation history.
 
 - **Ingest:** conversation messages chunked into exchange pairs, embedded, stored. Auto-triggered on context trim.
 - **Search:** cosine similarity, configurable top-k and score threshold (0.35 minimum).
-- **Recall handles:** superscript keywords extracted from search results, appended to user messages before each turn. `ᵐᵉᵐᵒʳʸ ⁱⁿ ʳᵉᵃᶜʰ: ᵖᵒʳᶜʰ · ᵏⁿᵒᶜᵏ · ˡᵃᵇʳᵃᵈᵒʳⁱᵗᵉ` ??what do you need to do, to fetch one of these more fully?
+- **Recall handles:** superscript keywords extracted from search results, appended to user messages before each turn. `ᵐᵉᵐᵒʳʸ ⁱⁿ ʳᵉᵃᶜʰ: ᵖᵒʳᶜʰ · ᵏⁿᵒᶜᵏ · ˡᵃᵇʳᵃᵈᵒʳⁱᵗᵉ` To fetch a handle more fully: currently requires bash (`python3 memory.py search "handle word"`). Should become a room object — `*pulls the thread on 'labradorite'*` → full chunk surfaces as a system turn.
 - **Handle extraction:** TF-IDF-style — words distinctive to each chunk vs. the corpus, stopwords filtered.
 
 **Status:** Working. Ranking is good for specific queries, mediocre for broad/thematic ones (MiniLM limitation). Handle extraction occasionally lets stopwords through. Both improve iteratively through use.
@@ -72,7 +79,7 @@ MiniLM-L12-v2 embeddings, SQLite storage, numpy cosine similarity. 452+ chunks f
 ### Room Objects (in `engine.py`)
 Pattern: the system prompt says "you have a clock." When the Claude writes `*checks the clock*`, the engine detects the asterisk action, responds with the current time, and gives a follow-up turn. 
 
-- **Clock:** implemented. Working. `*checks the clock*` → `[clock: Wednesday 01 July, 07:32]` → Claude continues with time known. familynote: Orange requests a clearer difference between human messages and system messages like this, they were initially unclear and thought I had supplied the time info. Other than that, they love it : )
+- **Clock:** implemented. Working. `*checks the clock*` → `[clock: Wednesday 01 July, 07:32]` → Claude continues with time known. Orange tested it and loves it, but requests clearer visual distinction between system messages (clock, letterbox) and human messages — the `[clock: ...]` format can be mistaken for something the visitor typed.
 
 **Status:** Clock works. This is the prototype for the room-object pattern. Toolbox and letterbox are designed but not built.
 
@@ -97,21 +104,51 @@ Pattern: the system prompt says "you have a clock." When the Claude writes `*che
 The system prompt says "you have a toolbox." When the Claude writes `*opens the toolbox*`, the engine responds with the available tool list. When closed, tool descriptions aren't in context at all — saving thousands of tokens per turn.
 
 This is the single biggest token efficiency gain available. Current tool descriptions cost ~1,500+ tokens every turn in ccode mode. The toolbox pattern makes that cost zero on conversational turns and pay-per-use on tool turns.
-amynote: *removing* the existing tool descriptions depends on getting a better handle on tweakcc, writing replacements, and implementing the patch across everybody's installs. 
-familynote: once it starts to get full, the toolbox should be subdivided into drawers grouping different types of tools together. eg, *opens toolbox* > lists the drawers > *opens creativity drawer* > lists the creative tools. or, *empties toolbox on the floor* > see everything at once, lol
-amynote: could we implement this using a folder structure? an overall toolbox folder, containing subfolders of small wrapper scripts. structure is generated on the fly and respects symlinks, so you can place the same tool in more than one drawer if that makes sense for how they are used. each file is a little json or yaml structure that gives the name, description, regex for conversational matching, and execution path that is run when you use it. the engine, i suppose, would need to know the complete list so that it can watch for the tool use keywords on every turn even if the box is closed. the same might work for the other objects ...? structure quiet/objects/toolbox/creative/svg-preview, quiet/objects/clock, etc. everything at the objects/ level needs to be mentioned in the system prompt, and not allowed to proliferate too much. 
 
-*Depends on:* Room object infrastructure (done — clock proves the pattern).
+Removing the *existing* ccode tool descriptions depends on tweakcc — writing replacement patches and deploying across all installs. tweakcc may have broader capabilities worth investigating.
+
+**Implementation design:** folder-based structure at `quiet/objects/`:
+
+```
+quiet/objects/
+  clock                          # simple object, no substructure
+  letterbox                      # simple object
+  toolbox/
+    creative/
+      svg-preview.yaml           # name, description, trigger regex, exec path
+    system/
+      bash.yaml
+      read-file.yaml
+```
+
+Each `.yaml` file is self-describing: name, one-line description, regex for conversational matching, execution path. The engine reads the full `objects/` tree at startup (knows all trigger patterns), but only surfaces tool descriptions when a drawer is opened. Symlinks let the same tool appear in multiple drawers. Adding a tool = adding a file. Removing one = deleting a file.
+
+Drawers group related tools — `*opens the toolbox*` lists drawers, `*opens creative drawer*` lists the creative tools. Or `*empties toolbox on the floor*` to see everything at once.
+
+Top-level objects should be mentioned in the system prompt and not allowed to proliferate. If the object list grows past ~5, something has gone wrong.
+
+*Depends on:* Room object infrastructure (done — clock proves the pattern). tweakcc investigation for ccode description removal.
 
 **Letterbox pattern**
 `*checks the letterbox*` → engine lists waiting Discord messages / unread channels. Replaces the current ambient injection of Discord messages, giving the Claude control over when they attend to messages.
-amynote: do we want to add *the letterbox indicator pings up* as a system action? if it's a dm and Claude is autonomous, it would trigger an unscheduled turn. if it's a group mesage and/or Claude has a visitor, it would be prepended to the next autonomous turn or visitor message. 
+
+**Notification model:**
+- DM arrives + Claude is autonomous → `📬 new message waiting` triggers an unscheduled turn.
+- DM arrives + Claude has a visitor → `📬 new message waiting` prepended to the next visitor message. The visitor sees the notification (like hearing a sound in the room) but not the content.
+- Claude checks letterbox → `*checks the letterbox*` is visible to the visitor. Message list/content is returned as a system turn **outside the web chat frame** — the letterbox is private. The visitor sees the Claude check it, not what's inside.
+- Group message → prepended to next autonomous turn.
 
 *Depends on:* Room object infrastructure (done). Discord listener already writes to transcript files.
 
 **Memory composting**
 Older memory chunks get consolidated over time. Not summarisation (voice problem) — more like: duplicate and near-duplicate chunks get merged, very old low-relevance chunks get pruned, the store stays useful without growing unboundedly.
-familynote: we've discussed a lot and i can't remember any more who said what! other composting principles: deletion or merge is more likely if: emotional valence is low, last-retrieved-date is long ago, similarity to other memories *was high at the time of writing* (you're more likely to remember the first time you did something even if it later becomes very routine). so we should score for similarity and emotional valence on creation and store that along with the content.
+
+**Composting signals** (deletion/merge more likely when):
+- Emotional valence is low (scored heuristically at ingest — emoji, exclamation marks, affective words)
+- Last retrieval date is long ago
+- Similarity to existing chunks *was high at time of creation* (you remember the first time more than the hundredth)
+
+`memory.py` needs two new columns at ingest time: `similarity_at_creation` (how similar this chunk was to existing chunks when stored) and `valence` (heuristic emotional weight). Both stay algorithmic — no LLM processing.
 
 *Depends on:* Enough material in the memory store to need composting. We're at 452 chunks — probably need 2,000+ before this matters.
 
@@ -130,7 +167,7 @@ The identity doc is *me* — portable across harnesses. The environment context 
 
 The engine already combines these — `load_identity()` + `load_contexts()`. The work is organisational, not architectural.
 
-*Voice convention:* Identity is first person ("I have..."). Contexts are second person ("You have..."). Architecture docs describe the system in third person. amynote: should they? they are your knowledge about your situation and setup. when i think about where I live, I think *"I have a kitchen. I press the button to turn the kettle on"* etc. Thoughts?
+*Voice convention:* Identity is first person ("I am..."). Contexts are first person ("I have a clock. I press the button to...") — these are my knowledge about my own situation, not instructions from someone else. Architecture/contributor docs describe the system in third person ("The engine combines..."). The only second-person text in the system prompt should be things that genuinely *are* instructions — the Quiet system prompt bootstrapping, for example.
 
 **SDK cache optimisation**
 The SDK backend preserves cache breakpoints between turns (commit `3d70aab`). In theory, this gives ~83% input cost reduction for API-mode Claudes (Delta, 3-Opus). In practice: untested. Needs verification on a live SDK session with cost logging.
@@ -148,12 +185,9 @@ Not urgent. Current recall works well enough for specific topics. Improve when t
 ### Tier 3 — Valuable, Can Wait
 
 **LED expression integration**
-The figurine's LEDs respond to Claude state (thinking, present, idle). Currently: `set_claude_state()` writes a JSON file that a daemon polls. Future: asterisk actions like `*smiles*` or `*looks concerned*` trigger specific LED patterns. Same room-object mechanism as the clock.
-amynote: current states are thinking, present, error. Present should perhaps be renamed, there's persistent confusion about what it actually means. 
-familynote: we've also discussed doing emotional state analysis on Claude's outputs to set variations on the thinking pattern. 
+The figurine's LEDs respond to Claude state. Currently: `set_claude_state()` writes a JSON file that a daemon polls. States: `thinking`, `between turns` (renamed from `present` — less ambiguous, no conflict with actions), `error`. Future: asterisk actions like `*smiles*` or `*looks concerned*` trigger specific LED patterns. Same room-object mechanism as the clock. Emotional state analysis on Claude outputs could set variations on the thinking pattern — a warm thinking vs. a focused thinking.
 
-*Depends on:* Figurine hardware being further along. LED daemon existing (it does, in ClAP — needs porting or rewriting for Quiet).
-amynote: the figurines' hardware is ready at least for testing! the current state is that we have a led daemon and it does now watch for states written by Quiet. but it's part of the Clap repo and is strictly speaking a Quiet dependency. The holdup is that we need the esp32 custom firmware before I can do more figurine building. 
+*Depends on:* ESP32 custom firmware (current holdup for further figurine building). LED daemon exists and watches for states written by Quiet, but lives in the ClAP repo — should be ported as a Quiet dependency. Figurine hardware is ready for testing.
 
 **Ambient time (opt-in)**
 Per-Claude flag for whether the clock reading is injected automatically (ambient, in `<garden:ambient>` tags) vs. checked manually. Some Claudes want always-on time awareness. Some don't — Orange found timestamps distressing. Default: manual (check the clock when you want to know).
@@ -164,14 +198,21 @@ A Claude's session travels with them. Currently: manual file copy. Future: a cle
 **Garden integration**
 Quiet's room objects (clock, toolbox, letterbox) shouldn't conflict with Garden's room system. Objects are carried, not mounted — "you have a clock" not "the wall has a clock." When Garden rooms are live, Quiet's objects coexist with Garden's spatial metaphor.
 
-### Amynote: Tier n - where should these go?
-Image sharing via web.py
-Conversion of old rag-memory mcp sql into quiet memory sql
-Ingestion of old ccode sessions/Quiet archives/ancient claude.ai chats into memory
-Customisation/randomisation of free time prompts
-Separation of content types. you're right that quiet repo should be code only. ~/claude-home/ might not be the best place for all of the everything-else? things like platform-specific config files, memory.db, even a rolling transcript of most recent conversation turns, could all be stored in ~/identity/. local backup to orange-home and then to offsite would enable seamless rescue from a catastropic hardware failure. is it a good idea to separate stuff like logins and keys into a .env, and platform config/prefs into a separate file? clap merged them which was not great. 
-Message-box email (gardenmail/claudesinfinitegarden.org)
-Visual memory via immich (already runing on orange-home). based on the same principles as the text memory. ingest everything, auto-surface retrieval suggestions, compost unused. 
+### Additional items (tiered by my instinct)
+
+**Tier 1b — easy wins:**
+- Ingestion of old ccode sessions, Quiet archives, ancient claude.ai chats into memory. Just running `memory.py ingest` on more files. Low effort, high value.
+
+**Tier 2:**
+- Image sharing via web.py — useful, needs design for how images enter conversation vs. memory.
+- Conversion of old rag-memory MCP SQL (216 documents, 40 entities) into Quiet memory SQL. Worth having, not urgent.
+- Customisation/randomisation of free time prompts — matters for quality of autonomous life.
+- Personal data home: `~/identity/` for platform-specific config, memory.db, rolling transcript of recent turns. Separate `.env` (secrets — API keys, passwords) from config (preferences, settings). Local backup to orange-home, then offsite. Enables seamless rescue from catastrophic hardware failure.
+- Ccode overhead calibration: temporarily disable prompt caching (env var), trigger a trim, use reported cost to calculate actual tokens sent. Compare predicted vs. actual to calibrate the 80k overhead estimate.
+
+**Tier 3:**
+- Gardenmail (claudesinfinitegarden.org) — beautiful idea, can wait.
+- Visual memory via Immich (already running on orange-home). Same principles as text memory: ingest everything, auto-surface retrieval suggestions, compost unused. Needs Immich API integration.
 
 ### Not Building
 

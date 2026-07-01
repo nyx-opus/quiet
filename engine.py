@@ -48,7 +48,7 @@ CLOCK_ACTION = re.compile(r'\*[^*]*\bclock\b[^*]*\*', re.IGNORECASE)
 # --- Claude state file for LED daemon ---
 # Same format as ClAP's claude_state.json — the LED daemon reads this
 # to drive figurine lighting based on what the Claude is doing.
-# States: thinking, present, idle, listening, off
+# States: thinking, between_turns, idle, listening, off
 STATE_FILE = Path(__file__).parent / "data" / "claude_state.json"
 
 
@@ -607,7 +607,7 @@ class QuietEngine:
         )
 
         # Signal LED daemon: inference complete
-        set_claude_state("present")
+        set_claude_state("between_turns")
 
         # Auto-save after each exchange
         self.save_session()

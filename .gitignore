@@ -45,3 +45,5 @@ discord_config.json
 unread_channels.json
 static/custom.css
 rag.db
+data/rag.db
+memory.db
