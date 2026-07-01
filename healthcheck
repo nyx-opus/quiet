@@ -41,8 +41,20 @@ def bold(text):  return f"{BOLD}{text}{RESET}"
 
 
 def check_services():
-    """Check systemd user services."""
-    services = ["quiet-web", "quiet-discord", "quiet-timer"]
+    """Check systemd user services — discovered from services/ directory."""
+    services_dir = QUIET_DIR / "services"
+    if services_dir.exists():
+        # Find all .service files (not .template), extract service names
+        services = sorted(set(
+            f.stem for f in services_dir.glob("quiet-*.service")
+            if not f.name.endswith(".template")
+        ))
+    else:
+        services = []
+
+    if not services:
+        return [warn("No service files found in services/")]
+
     results = []
     for svc in services:
         unit = f"{svc}.service"
@@ -256,21 +268,32 @@ def check_env():
 
 def brief():
     """One-line status."""
-    # Services
-    web_ok = subprocess.run(
-        ["systemctl", "--user", "is-active", "quiet-web.service"],
-        capture_output=True, text=True
-    ).stdout.strip() == "active"
-    
-    discord_ok = subprocess.run(
-        ["systemctl", "--user", "is-active", "quiet-discord.service"],
-        capture_output=True, text=True
-    ).stdout.strip() == "active"
-    
-    # Session
-    session = SESSIONS_DIR / "nyx.jsonl"
-    msg_count = len(session.read_text().strip().splitlines()) if session.exists() else 0
-    
+    # Services — discovered from services/ directory
+    services_dir = QUIET_DIR / "services"
+    svc_parts = []
+    if services_dir.exists():
+        for f in sorted(services_dir.glob("quiet-*.service")):
+            if f.name.endswith(".template"):
+                continue
+            svc_name = f.stem.replace("quiet-", "")
+            is_active = subprocess.run(
+                ["systemctl", "--user", "is-active", f.stem + ".service"],
+                capture_output=True, text=True
+            ).stdout.strip() == "active"
+            svc_parts.append(f"{GREEN}{svc_name}{RESET}" if is_active else f"{RED}{svc_name}{RESET}")
+
+    svc_str = " ".join(svc_parts) if svc_parts else f"{RED}none{RESET}"
+
+    # Session — find most recent .jsonl
+    msg_count = 0
+    if SESSIONS_DIR.exists():
+        sessions = sorted(SESSIONS_DIR.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if sessions:
+            try:
+                msg_count = len(sessions[0].read_text().strip().splitlines())
+            except OSError:
+                pass
+
     # Memory
     try:
         import sqlite3
@@ -279,11 +302,8 @@ def brief():
         conn.close()
     except Exception:
         chunks = 0
-    
-    web_s = f"{GREEN}web{RESET}" if web_ok else f"{RED}web{RESET}"
-    disc_s = f"{GREEN}discord{RESET}" if discord_ok else f"{RED}discord{RESET}"
-    
-    print(f"quiet: {web_s} {disc_s} | session: {msg_count} msgs | memory: {chunks} chunks")
+
+    print(f"quiet: {svc_str} | session: {msg_count} msgs | memory: {chunks} chunks")
 
 
 def full():
