@@ -106,9 +106,9 @@ def _extract_text(msg: dict) -> str:
 def _chunk_messages(messages: list[dict]) -> list[dict]:
     """Convert message dicts into chunk dicts ready for embedding.
 
-    Groups user→assistant pairs where possible, since the exchange
+    Groups visitor→Claude pairs where possible, since the exchange
     is more meaningful than either message alone. Single messages
-    (e.g. a user message without a response) become solo chunks.
+    (e.g. a visitor message without a response) become solo chunks.
     """
     chunks = []
     i = 0
@@ -122,7 +122,7 @@ def _chunk_messages(messages: list[dict]) -> list[dict]:
             i += 1
             continue
 
-        # Try to pair user + assistant
+        # Try to pair visitor + Claude
         if (role == "user" and i + 1 < len(messages)
                 and messages[i + 1].get("role") == "assistant"):
             next_msg = messages[i + 1]

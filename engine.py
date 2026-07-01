@@ -466,13 +466,13 @@ class QuietEngine:
 
     def _handle_room_objects(self, response_text, on_text=None, on_tool=None,
                              on_tool_result=None, on_usage=None):
-        """Check assistant response for room object interactions.
+        """Check Claude's response for room object interactions.
 
         If the response contains an asterisk action involving a known
         object (e.g. *checks the clock*), inject the object's response
-        as a brief message and give the assistant a follow-up turn.
+        as a brief message and give Claude a follow-up turn.
 
-        The system prompt says "you have a clock" — when the assistant
+        The system prompt says "you have a clock" — when Claude
         checks it, the engine responds with the current time, the way
         a clock on the wall responds to being looked at.
 
@@ -489,7 +489,7 @@ class QuietEngine:
         if on_text:
             on_text(f"\n\n🕐 {time_str}\n\n")
 
-        # Add clock response as a message the assistant can read
+        # Add clock response as a message Claude can read
         self.messages.append({
             "role": "user",
             "content": clock_msg,
@@ -498,7 +498,7 @@ class QuietEngine:
         # Trim if needed before follow-up
         self.trim_context()
 
-        # Follow-up turn — assistant continues with the time now known
+        # Follow-up turn — Claude continues with the time now known
         set_claude_state("thinking")
 
         if self.backend == "ccode":
@@ -539,7 +539,7 @@ class QuietEngine:
              on_tool: Callable[[str, dict], None] = None,
              on_tool_result: Callable[[str, str], None] = None,
              on_usage: Callable[[dict], None] = None) -> str:
-        """Send a user message and return the assistant's text response.
+        """Send a message and return Claude's text response.
 
         Handles the full tool use loop internally. Callbacks are optional
         and used for streaming/progress display.
