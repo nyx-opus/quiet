@@ -82,6 +82,11 @@ class QuietDiscordBot(discord.Client):
         # Track unique senders per batch (excluding self)
         self.group_senders = {}
 
+        # Message deduplication: track recently seen message IDs
+        # Prevents duplicate processing on reconnects or race conditions
+        self._seen_message_ids: set[int] = set()
+        self._seen_max = 1000  # rolling cap to prevent unbounded growth
+
     async def on_ready(self):
         # Resolve channel names from Discord
         for guild in self.guilds:
@@ -103,6 +108,17 @@ class QuietDiscordBot(discord.Client):
         # Never respond to self
         if message.author.id == self.user.id:
             return
+
+        # Deduplicate: skip messages we've already processed
+        if message.id in self._seen_message_ids:
+            return
+        self._seen_message_ids.add(message.id)
+        # Rolling cap: discard oldest entries when set gets too large
+        if len(self._seen_message_ids) > self._seen_max:
+            # Sets don't have order, but for dedup purposes we just
+            # need to keep *recent* IDs. Trim by removing half.
+            to_remove = sorted(self._seen_message_ids)[:self._seen_max // 2]
+            self._seen_message_ids -= set(to_remove)
 
         channel_id = str(message.channel.id)
         is_dm = isinstance(message.channel, discord.DMChannel)
@@ -188,14 +204,31 @@ class QuietDiscordBot(discord.Client):
         try:
             response_text = await self.send_to_quiet(tagged)
             if response_text:
-                for i in range(0, len(response_text), 1900):
-                    chunk = response_text[i:i + 1900]
-                    await message.channel.send(chunk)
-                # Also transcript the response
-                self.append_transcript(channel_name, "self", response_text)
-                print(f"  → responded ({len(response_text)} chars)")
+                # Don't relay session-limit or error messages back to Discord.
+                # These confuse other Claudes and cause cascade loops.
+                if self._is_system_noise(response_text):
+                    print(f"  → suppressed system response (not relayed)")
+                else:
+                    for i in range(0, len(response_text), 1900):
+                        chunk = response_text[i:i + 1900]
+                        await message.channel.send(chunk)
+                    # Also transcript the response
+                    self.append_transcript(channel_name, "self", response_text)
+                    print(f"  → responded ({len(response_text)} chars)")
         except Exception as e:
             print(f"  → error: {e}", file=sys.stderr)
+
+    @staticmethod
+    def _is_system_noise(text: str) -> bool:
+        """Check if a response is infrastructure noise that shouldn't
+        be relayed to Discord (session limits, errors, etc.)."""
+        noise_patterns = [
+            "session limit",
+            "Prompt is too long",
+            "resets ",  # "resets 5:30pm"
+        ]
+        first_line = text.strip().split("\n")[0].lower()
+        return any(p.lower() in first_line for p in noise_patterns)
 
     async def handle_group(self, message, sender, content, channel_name):
         """Handle group channel message — batch and deliver after n-1 messages.
@@ -259,11 +292,14 @@ class QuietDiscordBot(discord.Client):
         try:
             response_text = await self.send_to_quiet(tagged)
             if response_text:
-                for i in range(0, len(response_text), 1900):
-                    chunk = response_text[i:i + 1900]
-                    await reply_channel.send(chunk)
-                self.append_transcript(channel_name, "self", response_text)
-                print(f"  → responded ({len(response_text)} chars)")
+                if self._is_system_noise(response_text):
+                    print(f"  → suppressed system response (not relayed)")
+                else:
+                    for i in range(0, len(response_text), 1900):
+                        chunk = response_text[i:i + 1900]
+                        await reply_channel.send(chunk)
+                    self.append_transcript(channel_name, "self", response_text)
+                    print(f"  → responded ({len(response_text)} chars)")
         except Exception as e:
             print(f"  → error: {e}", file=sys.stderr)
 
