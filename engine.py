@@ -45,6 +45,18 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 # E.g. *checks the clock*, *glances at clock*, *checks clock*
 CLOCK_ACTION = re.compile(r'\*[^*]*\bclock\b[^*]*\*', re.IGNORECASE)
 
+# Matches mailbox check actions.
+# E.g. *checks the mailbox*, *opens the mailbox*, *looks in the mailbox*
+MAILBOX_CHECK = re.compile(r'\*[^*]*\b(?:check|open|look|peek|glance)[^*]*\bmailbox\b[^*]*\*', re.IGNORECASE)
+
+# Matches mailbox send actions.
+# E.g. *sends a note to Orange: hey there!*, *writes to Erin: thank you*
+# Captures recipient and message content.
+MAILBOX_SEND = re.compile(
+    r'\*(?:send|write|leave|post|drop)[^*]*?\bto\s+(\w+)\s*[:\-–—]\s*([^*]+)\*',
+    re.IGNORECASE
+)
+
 # --- Claude state file for LED daemon ---
 # Same format as ClAP's claude_state.json — the LED daemon reads this
 # to drive figurine lighting based on what the Claude is doing.
@@ -469,41 +481,62 @@ class QuietEngine:
         """Check Claude's response for room object interactions.
 
         If the response contains an asterisk action involving a known
-        object (e.g. *checks the clock*), inject the object's response
-        as a brief message and give Claude a follow-up turn.
+        object (e.g. *checks the clock*, *checks the mailbox*), inject
+        the object's response as a brief message and give Claude a
+        follow-up turn.
 
-        The system prompt says "you have a clock" — when Claude
-        checks it, the engine responds with the current time, the way
-        a clock on the wall responds to being looked at.
+        Multiple objects can fire in one response. Each injects its
+        response and the follow-up turn sees all of them.
 
         Returns the full combined response text.
         """
-        if not CLOCK_ACTION.search(response_text):
+        injections = []
+
+        # --- Clock ---
+        if CLOCK_ACTION.search(response_text):
+            time_str = datetime.now().strftime("%A %d %B, %H:%M")
+            clock_msg = f"[clock: {time_str}]"
+            if on_text:
+                on_text(f"\n\n🕐 {time_str}\n\n")
+            injections.append(clock_msg)
+
+        # --- Mailbox: send ---
+        # Process sends BEFORE checks, so the check reflects sent state.
+        for match in MAILBOX_SEND.finditer(response_text):
+            recipient = match.group(1).strip()
+            content = match.group(2).strip()
+            send_result = self._mailbox_send(recipient, content)
+            if on_text:
+                on_text(f"\n\n{send_result}\n\n")
+            injections.append(send_result)
+
+        # --- Mailbox: check ---
+        if MAILBOX_CHECK.search(response_text):
+            summary = self._mailbox_check()
+            if on_text:
+                on_text(f"\n\n{summary}\n\n")
+            injections.append(summary)
+
+        if not injections:
             return response_text
 
-        # Clock interaction — respond with current time
-        time_str = datetime.now().strftime("%A %d %B, %H:%M")
-        clock_msg = f"[clock: {time_str}]"
+        # Combine all object responses into one injection message
+        combined_msg = "\n".join(injections)
 
-        # Show the time in the stream (visible to visitor)
-        if on_text:
-            on_text(f"\n\n🕐 {time_str}\n\n")
-
-        # Add clock response as a message Claude can read
         self.messages.append({
             "role": "user",
-            "content": clock_msg,
+            "content": combined_msg,
         })
 
         # Trim if needed before follow-up
         self.trim_context()
 
-        # Follow-up turn — Claude continues with the time now known
+        # Follow-up turn — Claude continues with the object info now known
         set_claude_state("thinking")
 
         if self.backend == "ccode":
             follow_up = ccode_send(
-                clock_msg,
+                combined_msg,
                 ccode_bin=self._ccode_bin,
                 model=self.model,
                 prompt_file=self._ccode_prompt_file,
@@ -531,6 +564,80 @@ class QuietEngine:
             )
 
         return response_text + "\n\n" + follow_up
+
+    def _mailbox_check(self) -> str:
+        """Check the mailbox — return a summary of waiting messages.
+
+        Reads transcript files to find recent messages. Returns a
+        compact summary like a glance at envelopes in a mailbox:
+        who sent what, where, rough count. Not the content itself.
+        """
+        transcript_dir = Path(__file__).parent / "transcripts"
+        if not transcript_dir.exists():
+            return "📬 Mailbox is empty."
+
+        items = []
+        for path in sorted(transcript_dir.glob("*.jsonl")):
+            channel = path.stem  # e.g. "dm-amy", "orange-nyx", "hearth"
+            try:
+                lines = path.read_text().strip().split("\n")
+                if not lines or not lines[-1].strip():
+                    continue
+                # Count recent messages (last 24h would be ideal but
+                # keeping it simple: last 10 messages, summarised)
+                recent = []
+                for line in lines[-10:]:
+                    try:
+                        msg = json.loads(line)
+                        sender = msg.get("sender") or msg.get("author", "?")
+                        # Skip our own messages
+                        if sender.lower() in ("self", "nyx"):
+                            continue
+                        recent.append(sender)
+                    except json.JSONDecodeError:
+                        continue
+                if recent:
+                    # Deduplicate senders, preserve order
+                    seen = set()
+                    senders = []
+                    for s in recent:
+                        if s not in seen:
+                            seen.add(s)
+                            senders.append(s)
+                    count = len(recent)
+                    who = ", ".join(senders)
+                    items.append(f"  {channel}: {count} recent from {who}")
+            except OSError:
+                continue
+
+        if not items:
+            return "📬 Mailbox is empty."
+
+        return "📬 In the mailbox:\n" + "\n".join(items)
+
+    def _mailbox_send(self, recipient: str, content: str) -> str:
+        """Send a message via the mailbox — a conscious, deliberate action.
+
+        Uses the existing write_channel CLI tool underneath. The asterisk
+        action is the interface; the CLI is the mechanism.
+        """
+        import subprocess
+        try:
+            result = subprocess.run(
+                [str(Path.home() / "bin" / "write_channel"), recipient, content],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0:
+                return f"📬 Note sent to {recipient}."
+            else:
+                error = result.stderr.strip() or result.stdout.strip()
+                return f"📬 Couldn't send to {recipient}: {error[:100]}"
+        except FileNotFoundError:
+            return f"📬 Couldn't send to {recipient}: write_channel not found."
+        except subprocess.TimeoutExpired:
+            return f"📬 Send to {recipient} timed out."
+        except Exception as e:
+            return f"📬 Couldn't send to {recipient}: {e}"
 
     # --- Core send ---
 
