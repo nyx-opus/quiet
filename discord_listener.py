@@ -203,18 +203,26 @@ class QuietDiscordBot(discord.Client):
         if not message.author.bot:
             self._bot_chain.pop(channel_name, None)
 
+        # All messages now go through ambient: transcript + unread flag.
+        # The Claude reads messages via the mailbox (*checks the mailbox*,
+        # *reads from <channel>*) and sends replies deliberately via
+        # *sends a note to <name>: message*. No automatic response routing.
+        #
+        # The old "direct" mode injected messages as prompts and broadcast
+        # the entire response back to Discord — including internal monologue.
+        # That caused the cascade incidents of 2026-07-01 and 2026-07-04.
+        #
+        # Group mode is also routed through ambient now. The batching logic
+        # remains available but disabled by default; the mailbox's tier-2
+        # read (which shows the last 8 messages) serves the same purpose
+        # without forcing a prompt injection.
         if mode == "direct":
-            if message.author.bot and not self._cascade_allow(channel_name):
-                print(f"[cascade-guard] #{channel_name}: bot exchange cap "
-                      f"({self.cascade_cap}) reached — parked. Transcript "
-                      f"kept, unread flagged, no auto-response.")
-                await self.handle_ambient(sender, content, channel_name)
-                return
-            await self.handle_direct(message, sender, content, channel_name)
-        elif mode == "group":
-            await self.handle_group(message, sender, content, channel_name)
-        else:
-            await self.handle_ambient(sender, content, channel_name)
+            # Log that we received a direct message but are routing ambient
+            is_dm = isinstance(message.channel, discord.DMChannel)
+            source = "DM" if is_dm else f"#{channel_name}"
+            print(f"[mailbox] [discord {source}] {sender}: {content[:80]}"
+                  f" → transcripted, unread flagged")
+        await self.handle_ambient(sender, content, channel_name)
 
     def _cascade_allow(self, channel_key: str) -> bool:
         """Count a consecutive bot-to-bot exchange in this channel.

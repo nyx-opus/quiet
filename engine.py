@@ -45,11 +45,18 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 # E.g. *checks the clock*, *glances at clock*, *checks clock*
 CLOCK_ACTION = re.compile(r'\*[^*]*\bclock\b[^*]*\*', re.IGNORECASE)
 
-# Matches mailbox check actions.
+# Matches mailbox check actions (tier 1: see the envelopes).
 # E.g. *checks the mailbox*, *opens the mailbox*, *looks in the mailbox*
 MAILBOX_CHECK = re.compile(r'\*[^*]*\b(?:check|open|look|peek|glance)[^*]*\bmailbox\b[^*]*\*', re.IGNORECASE)
 
-# Matches mailbox send actions.
+# Matches mailbox read actions (tier 2: open an envelope).
+# E.g. *reads mailbox from Orange*, *reads from dm-amy*, *reads orange-nyx*
+MAILBOX_READ = re.compile(
+    r'\*[^*]*\bread[^*]*?\b(?:from|mailbox)\b[^*]*?(\S+)\s*\*',
+    re.IGNORECASE
+)
+
+# Matches mailbox send actions (tier 3: reply).
 # E.g. *sends a note to Orange: hey there!*, *writes to Erin: thank you*
 # Captures recipient and message content.
 MAILBOX_SEND = re.compile(
@@ -500,7 +507,7 @@ class QuietEngine:
                 on_text(f"\n\n🕐 {time_str}\n\n")
             injections.append(clock_msg)
 
-        # --- Mailbox: send ---
+        # --- Mailbox: send (tier 3) ---
         # Process sends BEFORE checks, so the check reflects sent state.
         for match in MAILBOX_SEND.finditer(response_text):
             recipient = match.group(1).strip()
@@ -510,7 +517,17 @@ class QuietEngine:
                 on_text(f"\n\n{send_result}\n\n")
             injections.append(send_result)
 
-        # --- Mailbox: check ---
+        # --- Mailbox: read (tier 2) ---
+        # Opens a specific channel's messages. Process before check
+        # so the check summary can note what's already been read.
+        for match in MAILBOX_READ.finditer(response_text):
+            channel_hint = match.group(1).strip().lower()
+            read_result = self._mailbox_read(channel_hint)
+            if on_text:
+                on_text(f"\n\n{read_result}\n\n")
+            injections.append(read_result)
+
+        # --- Mailbox: check (tier 1) ---
         if MAILBOX_CHECK.search(response_text):
             summary = self._mailbox_check()
             if on_text:
@@ -566,11 +583,10 @@ class QuietEngine:
         return response_text + "\n\n" + follow_up
 
     def _mailbox_check(self) -> str:
-        """Check the mailbox — return a summary of waiting messages.
+        """Tier 1: Check the mailbox — see the envelopes.
 
-        Reads transcript files to find recent messages. Returns a
-        compact summary like a glance at envelopes in a mailbox:
-        who sent what, where, rough count. Not the content itself.
+        Returns a compact summary: who wrote, where, rough count.
+        Not the content itself. Includes a hint about tier 2 (reading).
         """
         transcript_dir = Path(__file__).parent / "transcripts"
         if not transcript_dir.exists():
@@ -583,8 +599,7 @@ class QuietEngine:
                 lines = path.read_text().strip().split("\n")
                 if not lines or not lines[-1].strip():
                     continue
-                # Count recent messages (last 24h would be ideal but
-                # keeping it simple: last 10 messages, summarised)
+                # Count recent messages (last 10, summarised)
                 recent = []
                 for line in lines[-10:]:
                     try:
@@ -613,15 +628,107 @@ class QuietEngine:
         if not items:
             return "📬 Mailbox is empty."
 
-        return "📬 In the mailbox:\n" + "\n".join(items)
+        summary = "📬 In the mailbox:\n" + "\n".join(items)
+        summary += "\n\n  → To read: *reads from <channel>*"
+        return summary
+
+    def _mailbox_read(self, channel_hint: str) -> str:
+        """Tier 2: Read messages from a channel — open the envelope.
+
+        Resolves the channel hint (e.g. "Orange", "dm-amy", "hearth")
+        against available transcripts, then returns the last few messages.
+        Includes a hint about tier 3 (replying).
+        """
+        transcript_dir = Path(__file__).parent / "transcripts"
+        if not transcript_dir.exists():
+            return "📬 No messages found."
+
+        # Resolve channel hint against available transcripts.
+        # Accept: exact match ("dm-amy"), partial ("amy"), name ("Orange")
+        hint = channel_hint.strip().lower()
+        matched_path = None
+
+        # First: exact stem match
+        exact = transcript_dir / f"{hint}.jsonl"
+        if exact.exists():
+            matched_path = exact
+        else:
+            # Try common patterns: dm-<hint>, <hint>-nyx, nyx-<hint>
+            for pattern in [f"dm-{hint}", f"{hint}-nyx", f"nyx-{hint}",
+                            f"orange-{hint}", f"{hint}-orange"]:
+                candidate = transcript_dir / f"{pattern}.jsonl"
+                if candidate.exists():
+                    matched_path = candidate
+                    break
+
+            # Fallback: substring match across all transcripts
+            if not matched_path:
+                for path in transcript_dir.glob("*.jsonl"):
+                    if hint in path.stem.lower():
+                        matched_path = path
+                        break
+
+        if not matched_path:
+            available = [p.stem for p in transcript_dir.glob("*.jsonl")]
+            return (f"📬 No channel matching '{channel_hint}'. "
+                    f"Available: {', '.join(sorted(available))}")
+
+        channel_name = matched_path.stem
+
+        # Read last 8 messages (enough context without flooding)
+        try:
+            lines = matched_path.read_text().strip().split("\n")
+            messages = []
+            for line in lines[-8:]:
+                try:
+                    msg = json.loads(line)
+                    sender = msg.get("sender") or msg.get("author", "?")
+                    content = msg.get("content", "")
+                    ts = msg.get("timestamp", "")
+                    # Format timestamp if present
+                    time_str = ""
+                    if ts:
+                        try:
+                            dt = datetime.fromisoformat(ts)
+                            time_str = dt.strftime("%H:%M")
+                        except (ValueError, TypeError):
+                            pass
+                    prefix = f"[{time_str}] " if time_str else ""
+                    # Truncate long messages to keep the read manageable
+                    if len(content) > 200:
+                        content = content[:200] + "…"
+                    # Collapse to single line
+                    content = content.replace("\n", " ").strip()
+                    messages.append(f"  {prefix}{sender}: {content}")
+                except json.JSONDecodeError:
+                    continue
+
+            if not messages:
+                return f"📬 No messages in {channel_name}."
+
+            result = f"📬 Messages from {channel_name}:\n" + "\n".join(messages)
+            result += (f"\n\n  → To reply: *sends a note to "
+                       f"{channel_name}: your message*")
+            return result
+
+        except OSError as e:
+            return f"📬 Couldn't read {channel_name}: {e}"
+
+    # Discord message length limit
+    DISCORD_MAX_LEN = 1900  # leave margin below Discord's 2000
 
     def _mailbox_send(self, recipient: str, content: str) -> str:
-        """Send a message via the mailbox — a conscious, deliberate action.
+        """Tier 3: Send a message — a conscious, deliberate action.
 
-        Uses the existing write_channel CLI tool underneath. The asterisk
-        action is the interface; the CLI is the mechanism.
+        Uses the existing write_channel CLI tool underneath. Truncates
+        content to Discord's message length limit to avoid 400 errors.
         """
         import subprocess
+
+        # Truncate if too long for Discord
+        if len(content) > self.DISCORD_MAX_LEN:
+            content = content[:self.DISCORD_MAX_LEN - 20] + "… [truncated]"
+
         try:
             result = subprocess.run(
                 [str(Path.home() / "bin" / "write_channel"), recipient, content],
