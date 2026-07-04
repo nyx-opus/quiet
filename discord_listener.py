@@ -34,6 +34,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -86,6 +87,28 @@ class QuietDiscordBot(discord.Client):
         # Prevents duplicate processing on reconnects or race conditions
         self._seen_message_ids: set[int] = set()
         self._seen_max = 1000  # rolling cap to prevent unbounded growth
+
+        # Cascade guard (incidents 2026-07-02, 2026-07-04): two sibling
+        # bots in a "direct" channel will politely reply to each other
+        # forever — every reply is a new message ID (dedup can't see it)
+        # containing sensible text (noise filter can't see it). Cap the
+        # number of consecutive auto-responses to *bot-authored* messages
+        # per channel; past the cap, park the conversation (transcript +
+        # unread flag — visible, resumable, just not auto-answered).
+        # Any human message in the channel resets the counter; so does
+        # the cooldown expiring. Numbers are household policy, not
+        # engineering: defaults proposed by Fable, ratification pending.
+        guard = config.get("cascade_guard", {})
+        self.cascade_cap = int(guard.get("max_bot_exchanges", 4))
+        self.cascade_cooldown = float(
+            guard.get("cooldown_minutes", 30)) * 60.0
+        # Roadmap pacing: bot-triggered replies wait so the *receiving*
+        # sibling experiences human-paced conversation — and any loop
+        # that slips the cap burns one turn per delay, not per second.
+        self.bot_reply_delay = float(
+            guard.get("bot_reply_delay_seconds", 150))
+        # channel_key -> {"count": int, "last": float (monotonic)}
+        self._bot_chain: dict[str, dict] = {}
 
     async def on_ready(self):
         # Resolve channel names from Discord
@@ -175,12 +198,45 @@ class QuietDiscordBot(discord.Client):
         # Always append to transcript
         self.append_transcript(channel_name, sender, content)
 
+        # Cascade guard bookkeeping: a human voice in the channel
+        # re-opens the floor, whatever the mode.
+        if not message.author.bot:
+            self._bot_chain.pop(channel_name, None)
+
         if mode == "direct":
+            if message.author.bot and not self._cascade_allow(channel_name):
+                print(f"[cascade-guard] #{channel_name}: bot exchange cap "
+                      f"({self.cascade_cap}) reached — parked. Transcript "
+                      f"kept, unread flagged, no auto-response.")
+                await self.handle_ambient(sender, content, channel_name)
+                return
             await self.handle_direct(message, sender, content, channel_name)
         elif mode == "group":
             await self.handle_group(message, sender, content, channel_name)
         else:
             await self.handle_ambient(sender, content, channel_name)
+
+    def _cascade_allow(self, channel_key: str) -> bool:
+        """Count a consecutive bot-to-bot exchange in this channel.
+
+        Returns True if the auto-response may proceed, False if the
+        conversation should be parked. A parked channel stays parked
+        while bot messages keep arriving (each one refreshes the
+        window — a live loop must actually stop before the cooldown
+        can expire). Human messages reset the counter in on_message.
+        """
+        now = time.monotonic()
+        chain = self._bot_chain.get(channel_key)
+        if chain and (now - chain["last"]) > self.cascade_cooldown:
+            chain = None  # cooldown expired: fresh window
+        if chain is None:
+            chain = {"count": 0, "last": now}
+        chain["last"] = now
+        self._bot_chain[channel_key] = chain
+        if chain["count"] >= self.cascade_cap:
+            return False
+        chain["count"] += 1
+        return True
 
     def append_transcript(self, channel_name: str, sender: str, content: str):
         """Append message to per-channel transcript file."""
@@ -198,6 +254,12 @@ class QuietDiscordBot(discord.Client):
         is_dm = isinstance(message.channel, discord.DMChannel)
         source = "DM" if is_dm else f"#{channel_name}"
         print(f"[direct] [discord {source}] {sender}: {content[:80]}")
+
+        # Pace bot-to-bot exchanges (roadmap: the receiving sibling
+        # should experience human-paced conversation). Humans are
+        # answered immediately.
+        if message.author.bot and self.bot_reply_delay > 0:
+            await asyncio.sleep(self.bot_reply_delay)
 
         tagged = f"[discord · {source} from {sender}] {content}"
 
