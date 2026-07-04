@@ -23,6 +23,7 @@ cache_control metadata so it doesn't persist to disk.
 import sys
 from typing import Callable
 from tools import execute_tool
+from session import normalise_content
 
 
 def _set_cache_breakpoint(messages: list):
@@ -144,7 +145,18 @@ def sdk_send(messages: list, *,
 
             response = stream.get_final_message()
 
-        messages.append({"role": "assistant", "content": response.content})
+        # Normalise SDK content objects to plain dicts at append time.
+        # Battle scar (2026-07-04): response.content is a list of SDK
+        # objects (TextBlock, ToolUseBlock), not dicts. _set_cache_breakpoint
+        # only recognises dict blocks, so on every subsequent turn its
+        # isinstance checks fell through and it silently returned None —
+        # the breakpoint stayed frozen at the session-load position and
+        # the entire live conversation paid full input rate, growing every
+        # turn ($1.20+ per message on 65k-token histories). Normalising
+        # here means breakpoints can advance and the history actually
+        # gets cache-read instead of re-written.
+        messages.append({"role": "assistant",
+                         "content": normalise_content(response.content)})
 
         # Track usage for every API call (including tool loops)
         usage_info = {
