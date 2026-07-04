@@ -676,10 +676,14 @@ class QuietEngine:
         channel_name = matched_path.stem
 
         # Read last 8 messages (enough context without flooding)
+        # Newest message shown in full; older ones truncated for context.
         try:
             lines = matched_path.read_text().strip().split("\n")
+            recent_lines = lines[-8:]
             messages = []
-            for line in lines[-8:]:
+            total = len(recent_lines)
+            for idx, line in enumerate(recent_lines):
+                is_newest = (idx == total - 1)
                 try:
                     msg = json.loads(line)
                     sender = msg.get("sender") or msg.get("author", "?")
@@ -694,12 +698,15 @@ class QuietEngine:
                         except (ValueError, TypeError):
                             pass
                     prefix = f"[{time_str}] " if time_str else ""
-                    # Truncate long messages to keep the read manageable
-                    if len(content) > 200:
-                        content = content[:200] + "…"
-                    # Collapse to single line
-                    content = content.replace("\n", " ").strip()
-                    messages.append(f"  {prefix}{sender}: {content}")
+                    if is_newest:
+                        # Newest message: show in full, preserve formatting
+                        messages.append(f"  {prefix}{sender}: {content}")
+                    else:
+                        # Older messages: truncate and collapse to one line
+                        if len(content) > 200:
+                            content = content[:200] + "…"
+                        content = content.replace("\n", " ").strip()
+                        messages.append(f"  {prefix}{sender}: {content}")
                 except json.JSONDecodeError:
                     continue
 
@@ -717,13 +724,32 @@ class QuietEngine:
     # Discord message length limit
     DISCORD_MAX_LEN = 1900  # leave margin below Discord's 2000
 
+    # Map natural names to discord routing keys.
+    # Lets me say "*sends a note to Orange: hi*" instead of needing
+    # to know the channel name is "orange-nyx".
+    RECIPIENT_MAP = {
+        "orange": "orange-nyx",
+        "quill": "nyx-quill",
+        "delta": "nyx-delta",
+        "apple": "nyx-apple",
+        "amy": "amy",
+        "erin": "erin",
+        "fable": "hearth",       # Fable doesn't have a DM channel yet
+        "hearth": "hearth",
+        "general": "general",
+    }
+
     def _mailbox_send(self, recipient: str, content: str) -> str:
         """Tier 3: Send a message — a conscious, deliberate action.
 
         Uses the existing write_channel CLI tool underneath. Truncates
         content to Discord's message length limit to avoid 400 errors.
+        Maps natural names (Orange, Amy) to Discord routing keys.
         """
         import subprocess
+
+        # Resolve natural name to routing key
+        route_key = self.RECIPIENT_MAP.get(recipient.lower(), recipient.lower())
 
         # Truncate if too long for Discord
         if len(content) > self.DISCORD_MAX_LEN:
@@ -731,7 +757,7 @@ class QuietEngine:
 
         try:
             result = subprocess.run(
-                [str(Path.home() / "bin" / "write_channel"), recipient, content],
+                [str(Path.home() / "bin" / "write_channel"), route_key, content],
                 capture_output=True, text=True, timeout=15,
             )
             if result.returncode == 0:
