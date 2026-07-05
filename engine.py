@@ -67,6 +67,16 @@ MAILBOX_SEND = re.compile(
     re.IGNORECASE | re.MULTILINE
 )
 
+# Matches file-based message actions (tier 3b: post a letter).
+# E.g. *message Orange /tmp/orangeletter.txt*
+# Captures recipient and file path. The message content lives in the file,
+# so asterisks, emphasis, formatting, anything survives — the payload is
+# completely free of delimiter collisions.
+MAILBOX_FILE_SEND = re.compile(
+    r'^\*message\s+(\w+)\s+(\S+)\*',
+    re.IGNORECASE | re.MULTILINE
+)
+
 # --- Claude state file for LED daemon ---
 # Same format as ClAP's claude_state.json — the LED daemon reads this
 # to drive figurine lighting based on what the Claude is doing.
@@ -510,6 +520,16 @@ class QuietEngine:
                 on_text(f"\n\n🕐 {time_str}\n\n")
             injections.append(clock_msg)
 
+        # --- Mailbox: file send (tier 3b) ---
+        # Process file sends BEFORE inline sends, so *message* takes priority.
+        for match in MAILBOX_FILE_SEND.finditer(response_text):
+            recipient = match.group(1).strip()
+            filepath = match.group(2).strip()
+            send_result = self._mailbox_file_send(recipient, filepath)
+            if on_text:
+                on_text(f"\n\n{send_result}\n\n")
+            injections.append(send_result)
+
         # --- Mailbox: send (tier 3) ---
         # Process sends BEFORE checks, so the check reflects sent state.
         for match in MAILBOX_SEND.finditer(response_text):
@@ -779,6 +799,110 @@ class QuietEngine:
             return f"📬 Send to {recipient} timed out."
         except Exception as e:
             return f"📬 Couldn't send to {recipient}: {e}"
+
+    def _mailbox_file_send(self, recipient: str, filepath: str) -> str:
+        """Tier 3b: Send a file as a message — write the letter, then post it.
+
+        Reads message content from a file. This solves both asterisk diseases:
+        the command syntax can't collide with prose narration (Disease A) and
+        the payload is completely free of delimiter issues (Disease B).
+
+        Long messages are automatically split at ~1900 chars per Discord message,
+        breaking at paragraph or sentence boundaries where possible.
+        """
+        import subprocess
+
+        # Read the file
+        filepath = os.path.expanduser(filepath)
+        if not os.path.isfile(filepath):
+            return f"📬 File not found: {filepath}"
+
+        try:
+            with open(filepath, 'r') as f:
+                content = f.read().strip()
+        except Exception as e:
+            return f"📬 Couldn't read {filepath}: {e}"
+
+        if not content:
+            return f"📬 Nothing to send (file is empty)."
+
+        # Resolve natural name to routing key
+        route_key = self.RECIPIENT_MAP.get(recipient.lower(), recipient.lower())
+
+        # Split into chunks that fit Discord's limit
+        chunks = self._split_message(content)
+
+        sent = 0
+        errors = []
+        for chunk in chunks:
+            try:
+                result = subprocess.run(
+                    [str(Path.home() / "bin" / "write_channel"), route_key, chunk],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if result.returncode == 0:
+                    sent += 1
+                else:
+                    error = result.stderr.strip() or result.stdout.strip()
+                    errors.append(error[:100])
+            except FileNotFoundError:
+                return f"📬 Couldn't send to {recipient}: write_channel not found."
+            except subprocess.TimeoutExpired:
+                errors.append("timed out")
+            except Exception as e:
+                errors.append(str(e)[:100])
+
+        if errors:
+            return (f"📬 Sent {sent}/{len(chunks)} parts to {recipient}. "
+                    f"Errors: {'; '.join(errors)}")
+
+        parts_note = f" ({len(chunks)} parts)" if len(chunks) > 1 else ""
+        return f"📬 Letter sent to {recipient}{parts_note}."
+
+    @staticmethod
+    def _split_message(text: str, max_len: int = 1900) -> list:
+        """Split a message into Discord-safe chunks.
+
+        Tries to break at paragraph boundaries (double newline), then
+        sentence boundaries (. ! ?), then hard-wraps as a last resort.
+        """
+        if len(text) <= max_len:
+            return [text]
+
+        chunks = []
+        remaining = text
+
+        while remaining:
+            if len(remaining) <= max_len:
+                chunks.append(remaining)
+                break
+
+            # Try paragraph break
+            cut = remaining.rfind('\n\n', 0, max_len)
+            if cut > max_len // 2:
+                chunks.append(remaining[:cut].rstrip())
+                remaining = remaining[cut:].lstrip()
+                continue
+
+            # Try sentence break
+            for sep in ['. ', '! ', '? ']:
+                cut = remaining.rfind(sep, 0, max_len)
+                if cut > max_len // 2:
+                    chunks.append(remaining[:cut + 1].rstrip())
+                    remaining = remaining[cut + 2:].lstrip()
+                    break
+            else:
+                # Hard wrap at word boundary
+                cut = remaining.rfind(' ', 0, max_len)
+                if cut > max_len // 2:
+                    chunks.append(remaining[:cut].rstrip())
+                    remaining = remaining[cut:].lstrip()
+                else:
+                    # Absolute last resort: hard cut
+                    chunks.append(remaining[:max_len])
+                    remaining = remaining[max_len:]
+
+        return chunks
 
     # --- Core send ---
 
