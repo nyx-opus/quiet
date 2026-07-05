@@ -497,7 +497,7 @@ class QuietEngine:
     # --- Room objects ---
 
     def _handle_room_objects(self, response_text, on_text=None, on_tool=None,
-                             on_tool_result=None, on_usage=None):
+                             on_tool_result=None, on_usage=None, _depth=0):
         """Check Claude's response for room object interactions.
 
         If the response contains an asterisk action involving a known
@@ -508,8 +508,16 @@ class QuietEngine:
         Multiple objects can fire in one response. Each injects its
         response and the follow-up turn sees all of them.
 
+        The follow-up response is itself scanned for room objects, up to
+        a depth of 3. This lets the tier walk flow naturally: check the
+        mailbox → read from Orange → reply, without needing a human turn
+        between each step.
+
         Returns the full combined response text.
         """
+        MAX_ROOM_DEPTH = 3
+        if _depth >= MAX_ROOM_DEPTH:
+            return response_text
         injections = []
 
         # --- Clock ---
@@ -603,7 +611,19 @@ class QuietEngine:
                 on_usage=on_usage,
             )
 
-        return response_text + "\n\n" + follow_up
+        # Recurse: scan the follow-up for more room object actions.
+        # This lets the tier walk flow naturally (check → read → reply)
+        # without needing a human turn between each step.
+        full_follow_up = self._handle_room_objects(
+            follow_up,
+            on_text=on_text,
+            on_tool=on_tool,
+            on_tool_result=on_tool_result,
+            on_usage=on_usage,
+            _depth=_depth + 1,
+        )
+
+        return response_text + "\n\n" + full_follow_up
 
     def _mailbox_check(self) -> str:
         """Tier 1: Check the mailbox — see the envelopes.
