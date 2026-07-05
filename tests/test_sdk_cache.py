@@ -92,6 +92,31 @@ def test_normalise_handles_tool_use_blocks():
     assert _set_cache_breakpoint(messages) is not None
 
 
+def test_cache_ttl_config():
+    """CACHE_TTL=1h adds extended TTL; unset stays standard ephemeral."""
+    import tempfile
+    from pathlib import Path
+    import config_reader
+
+    original = config_reader.CONFIG_PATH
+    try:
+        # Unset (missing config file) -> standard ephemeral, no ttl key
+        config_reader.CONFIG_PATH = Path(tempfile.mkdtemp()) / "nonexistent.txt"
+        assert config_reader.cache_control() == {"type": "ephemeral"}
+
+        # CACHE_TTL=1h -> extended TTL
+        p = Path(tempfile.mkstemp(suffix=".txt")[1])
+        p.write_text("CACHE_TTL=1h\n")
+        config_reader.CONFIG_PATH = p
+        assert config_reader.cache_control() == {"type": "ephemeral", "ttl": "1h"}
+
+        # Explicit 5m -> standard
+        p.write_text("CACHE_TTL=5m\n")
+        assert config_reader.cache_control() == {"type": "ephemeral"}
+    finally:
+        config_reader.CONFIG_PATH = original
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

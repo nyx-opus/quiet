@@ -27,6 +27,7 @@ from typing import Callable, Optional
 
 from anthropic import Anthropic
 from pricing import cost_of, format_cost
+from config_reader import cache_control
 
 # Modules split out from the original monolithic engine.py
 from session import (
@@ -211,7 +212,7 @@ def build_system_prompt(identity_text: str, human_name: str = None,
         blocks.append({"type": "text", "text": system_prefix})
     if identity_text:
         blocks.append({"type": "text", "text": identity_text,
-                        "cache_control": {"type": "ephemeral"}})
+                        "cache_control": cache_control()})
     if human_name:
         blocks.append({
             "type": "text",
@@ -223,7 +224,7 @@ def build_system_prompt(identity_text: str, human_name: str = None,
     contexts_text = load_contexts()
     if contexts_text:
         blocks.append({"type": "text", "text": contexts_text,
-                        "cache_control": {"type": "ephemeral"}})
+                        "cache_control": cache_control()})
 
     # Legacy single context string (from --context flag or config)
     if context:

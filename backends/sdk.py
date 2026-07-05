@@ -24,6 +24,7 @@ import sys
 from typing import Callable
 from tools import execute_tool
 from session import normalise_content
+from config_reader import cache_control
 
 
 def _set_cache_breakpoint(messages: list):
@@ -88,13 +89,13 @@ def _set_cache_breakpoint(messages: list):
         for i in range(len(content) - 1, -1, -1):
             block = content[i]
             if isinstance(block, dict) and block.get("type") in ("text", "tool_result"):
-                block["cache_control"] = {"type": "ephemeral"}
+                block["cache_control"] = cache_control()
                 return (target_idx, i, False)
     elif isinstance(content, str):
         # Convert string content to block format to support cache_control
         messages[target_idx]["content"] = [
             {"type": "text", "text": content,
-             "cache_control": {"type": "ephemeral"}}
+             "cache_control": cache_control()}
         ]
         return (target_idx, 0, True)
 

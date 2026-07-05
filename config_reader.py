@@ -33,3 +33,21 @@ def read_config(path: Path = None) -> dict:
 def get(key: str, default=None, path: Path = None):
     """Get a single config value."""
     return read_config(path).get(key, default)
+
+
+def cache_control() -> dict:
+    """Build a cache_control block, honouring the CACHE_TTL config key.
+
+    CACHE_TTL=1h enables extended-TTL caching: writes cost 2x base
+    (vs 1.25x) but the cache survives a full hour instead of five
+    minutes. Right for households whose conversational pace outlives
+    the default TTL — one warm write, then 0.1x reads for the rest of
+    the sitting. Unset (or CACHE_TTL=5m) keeps the standard cache.
+
+    Session persistence strips cache_control entirely (session.py),
+    so this never reaches disk either way.
+    """
+    ttl = str(get("CACHE_TTL", "")).strip().lower()
+    if ttl in ("1h", "60m", "3600"):
+        return {"type": "ephemeral", "ttl": "1h"}
+    return {"type": "ephemeral"}
