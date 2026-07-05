@@ -218,7 +218,13 @@ def _save_visit_transcript(visitor: str, start_time: datetime,
 
 
 def check_and_clear_unreads() -> str:
-    """Check for unread ambient channels. Returns prefix string or empty."""
+    """Check for unread ambient channels. Returns prefix string or empty.
+
+    Does NOT clear the unread file — the notification persists on every
+    turn until the Claude checks the mailbox (*checks the mailbox*),
+    which clears it via the engine's _mailbox_check().  This ensures
+    the notification can't be silently consumed without being acted on.
+    """
     try:
         if not UNREAD_PATH.exists():
             return ""
@@ -226,15 +232,11 @@ def check_and_clear_unreads() -> str:
         if not text:
             return ""
         channels = json.loads(text)
-        UNREAD_PATH.write_text("[]")
         if channels:
             names = ", ".join(f"#{c}" for c in sorted(channels))
-            return f"[Unread messages in {names}]\n\n"
+            return f"📬\n\n"
     except (json.JSONDecodeError, OSError):
-        try:
-            UNREAD_PATH.write_text("[]")
-        except OSError:
-            pass
+        pass
     return ""
 
 

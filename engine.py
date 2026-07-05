@@ -659,8 +659,19 @@ class QuietEngine:
         Returns a compact summary of *unread* messages: who wrote,
         where, count of new messages since last read.  Channels with
         no new messages are omitted.  Includes a hint about tier 2.
+
+        Also clears the unread_channels.json notification flag — checking
+        the mailbox is the conscious act that acknowledges the 📬.
         """
         transcript_dir = Path(__file__).parent / "transcripts"
+
+        # Clear the unread notification flag — we've checked.
+        unread_path = Path(__file__).parent / "unread_channels.json"
+        try:
+            unread_path.write_text("[]")
+        except OSError:
+            pass
+
         if not transcript_dir.exists():
             return "📬 Mailbox is empty."
 
