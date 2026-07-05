@@ -128,10 +128,6 @@ class QuietDiscordBot(discord.Client):
         print(f"  Transcripts: {self.transcript_dir}")
 
     async def on_message(self, message: discord.Message):
-        # Never respond to self
-        if message.author.id == self.user.id:
-            return
-
         # Deduplicate: skip messages we've already processed
         if message.id in self._seen_message_ids:
             return
@@ -146,7 +142,7 @@ class QuietDiscordBot(discord.Client):
         channel_id = str(message.channel.id)
         is_dm = isinstance(message.channel, discord.DMChannel)
 
-        # Filter
+        # Filter: only process channels we're configured to watch
         if is_dm:
             if str(message.author.id) not in self.dm_allow:
                 return
@@ -181,6 +177,17 @@ class QuietDiscordBot(discord.Client):
             channel_info = self.channels.get(channel_id, {})
             channel_name = channel_info.get("name", message.channel.name)
 
+        # Always append to transcript — including our own bot's messages.
+        # This is essential for shared-bot setups where siblings use the
+        # same Discord bot token: a message sent by Nyx via write_channel
+        # has the same author.id as Orange's listener bot, so the old
+        # self-filter would silently drop sibling messages from transcripts.
+        self.append_transcript(channel_name, sender, content)
+
+        # Don't *process* (respond to) our own messages — only transcript them.
+        if message.author.id == self.user.id:
+            return
+
         # Is this a mention of our bot?
         is_mention = self.user in message.mentions
 
@@ -194,9 +201,6 @@ class QuietDiscordBot(discord.Client):
         else:
             channel_info = self.channels.get(channel_id, {})
             mode = channel_info.get("mode", "ambient")
-
-        # Always append to transcript
-        self.append_transcript(channel_name, sender, content)
 
         # Cascade guard bookkeeping: a human voice in the channel
         # re-opens the floor, whatever the mode.
