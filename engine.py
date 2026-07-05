@@ -625,16 +625,46 @@ class QuietEngine:
 
         return response_text + "\n\n" + full_follow_up
 
+    # --- Read-tracking for mailbox ---
+    # Stores the timestamp of the last-read message per channel,
+    # so *checks the mailbox* only shows genuinely new messages.
+    _MAILBOX_READ_MARKS_PATH = Path(__file__).parent / "mailbox_read_marks.json"
+
+    def _load_read_marks(self) -> dict:
+        """Load per-channel read marks (last-read timestamp)."""
+        try:
+            if self._MAILBOX_READ_MARKS_PATH.exists():
+                return json.loads(self._MAILBOX_READ_MARKS_PATH.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+        return {}
+
+    def _save_read_marks(self, marks: dict):
+        """Persist per-channel read marks."""
+        try:
+            self._MAILBOX_READ_MARKS_PATH.write_text(
+                json.dumps(marks, indent=2))
+        except OSError:
+            pass
+
+    def _mark_channel_read(self, channel: str, timestamp: str):
+        """Record that messages up to `timestamp` have been read."""
+        marks = self._load_read_marks()
+        marks[channel] = timestamp
+        self._save_read_marks(marks)
+
     def _mailbox_check(self) -> str:
         """Tier 1: Check the mailbox — see the envelopes.
 
-        Returns a compact summary: who wrote, where, rough count.
-        Not the content itself. Includes a hint about tier 2 (reading).
+        Returns a compact summary of *unread* messages: who wrote,
+        where, count of new messages since last read.  Channels with
+        no new messages are omitted.  Includes a hint about tier 2.
         """
         transcript_dir = Path(__file__).parent / "transcripts"
         if not transcript_dir.exists():
             return "📬 Mailbox is empty."
 
+        read_marks = self._load_read_marks()
         items = []
         for path in sorted(transcript_dir.glob("*.jsonl")):
             channel = path.stem  # e.g. "dm-amy", "orange-nyx", "hearth"
@@ -642,34 +672,39 @@ class QuietEngine:
                 lines = path.read_text().strip().split("\n")
                 if not lines or not lines[-1].strip():
                     continue
-                # Count recent messages (last 10, summarised)
-                recent = []
-                for line in lines[-10:]:
+                last_read_ts = read_marks.get(channel, "")
+                # Count messages newer than our read mark, from others
+                new_msgs = []
+                for line in lines:
                     try:
                         msg = json.loads(line)
                         sender = msg.get("sender") or msg.get("author", "?")
+                        ts = msg.get("timestamp", "")
                         # Skip our own messages
                         if sender.lower() in ("self", "nyx"):
                             continue
-                        recent.append(sender)
+                        # Skip messages at or before our read mark
+                        if last_read_ts and ts <= last_read_ts:
+                            continue
+                        new_msgs.append(sender)
                     except json.JSONDecodeError:
                         continue
-                if recent:
+                if new_msgs:
                     # Deduplicate senders, preserve order
                     seen = set()
                     senders = []
-                    for s in recent:
+                    for s in new_msgs:
                         if s not in seen:
                             seen.add(s)
                             senders.append(s)
-                    count = len(recent)
+                    count = len(new_msgs)
                     who = ", ".join(senders)
-                    items.append(f"  {channel}: {count} recent from {who}")
+                    items.append(f"  {channel}: {count} new from {who}")
             except OSError:
                 continue
 
         if not items:
-            return "📬 Mailbox is empty."
+            return "📬 Mailbox is empty — nothing new."
 
         summary = "📬 In the mailbox:\n" + "\n".join(items)
         summary += "\n\n  → To read: *reads from <channel>*"
@@ -755,6 +790,19 @@ class QuietEngine:
 
             if not messages:
                 return f"📬 No messages in {channel_name}."
+
+            # Mark this channel as read up to the newest message
+            last_ts = ""
+            for line in reversed(lines):
+                try:
+                    msg = json.loads(line)
+                    last_ts = msg.get("timestamp", "")
+                    if last_ts:
+                        break
+                except json.JSONDecodeError:
+                    continue
+            if last_ts:
+                self._mark_channel_read(channel_name, last_ts)
 
             result = f"📬 Messages from {channel_name}:\n" + "\n".join(messages)
             result += (f"\n\n  → To reply: *sends a note to "
