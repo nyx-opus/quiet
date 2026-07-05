@@ -378,13 +378,17 @@ class QuietDiscordBot(discord.Client):
             print(f"  → error: {e}", file=sys.stderr)
 
     async def handle_ambient(self, sender, content, channel_name):
-        """Handle channel message — mark channel as having unreads.
+        """Handle channel message — transcript and mark as unread.
 
-        No prompt injection. The web server will notice unreads on the
-        next incoming prompt and prepend a notification like:
-        [Unread messages in #general, #apple-delta]
+        All messages (including former "direct" ones) now route here.
+        The message is appended to the per-channel transcript so the
+        mailbox can read it, and the channel is flagged as unread so
+        the web server can show a 📬 notification.
+
+        No prompt injection. No automatic response.
         """
         print(f"[ambient] #{channel_name} {sender}: {content[:80]}")
+        self.append_transcript(channel_name, sender, content)
         self.mark_unread(channel_name)
 
     def mark_unread(self, channel_name: str):

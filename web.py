@@ -234,7 +234,7 @@ def check_and_clear_unreads() -> str:
         channels = json.loads(text)
         if channels:
             names = ", ".join(f"#{c}" for c in sorted(channels))
-            return f"📬\n\n"
+            return f"[Unread messages in {names}]\n\n"
     except (json.JSONDecodeError, OSError):
         pass
     return ""
