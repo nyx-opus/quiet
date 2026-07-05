@@ -60,9 +60,11 @@ MAILBOX_READ = re.compile(
 # Matches mailbox send actions (tier 3: reply).
 # E.g. *sends a note to Orange: hey there!*, *writes to Erin: thank you*
 # Captures recipient and message content.
+# Requires ^ (start of line) to avoid Disease A (use vs mention):
+# describing the command in prose shouldn't fire it.
 MAILBOX_SEND = re.compile(
-    r'\*(?:send|write|leave|post|drop)[^*]*?\bto\s+(\w+)\s*[:\-–—]\s*([^*]+)\*',
-    re.IGNORECASE
+    r'^\*(?:send|write|leave|post|drop)[^*]*?\bto\s+(\w+)\s*[:\-–—]\s*([^*]+)\*',
+    re.IGNORECASE | re.MULTILINE
 )
 
 # --- Claude state file for LED daemon ---
@@ -748,6 +750,11 @@ class QuietEngine:
         Maps natural names (Orange, Amy) to Discord routing keys.
         """
         import subprocess
+
+        # Guard: don't send empty/whitespace-only messages
+        content = content.strip()
+        if not content:
+            return f"📬 Nothing to send (empty message)."
 
         # Resolve natural name to routing key
         route_key = self.RECIPIENT_MAP.get(recipient.lower(), recipient.lower())
