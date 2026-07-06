@@ -177,15 +177,16 @@ class QuietDiscordBot(discord.Client):
             channel_info = self.channels.get(channel_id, {})
             channel_name = channel_info.get("name", message.channel.name)
 
-        # Always append to transcript — including our own bot's messages.
+        # Transcript our own bot's messages here, then return early.
         # This is essential for shared-bot setups where siblings use the
         # same Discord bot token: a message sent by Nyx via write_channel
         # has the same author.id as Orange's listener bot, so the old
         # self-filter would silently drop sibling messages from transcripts.
-        self.append_transcript(channel_name, sender, content)
-
-        # Don't *process* (respond to) our own messages — only transcript them.
+        #
+        # Non-self messages are transcripted by handle_ambient() below —
+        # doing it here too would double-write them.
         if message.author.id == self.user.id:
+            self.append_transcript(channel_name, sender, content)
             return
 
         # Is this a mention of our bot?
