@@ -110,19 +110,38 @@ class QuietDiscordBot(discord.Client):
         # channel_key -> {"count": int, "last": float (monotonic)}
         self._bot_chain: dict[str, dict] = {}
 
+        # Wake trigger: when a direct message arrives, poke the Quiet
+        # web server so the resident notices promptly instead of waiting
+        # for the next autonomous timer tick (up to 60 min away).
+        # Debounced: at most one wake per 30 seconds to prevent floods.
+        self._last_wake_trigger: float = 0.0
+        self._wake_debounce: float = 30.0  # seconds
+
     async def on_ready(self):
-        # Resolve channel names from Discord
+        # Resolve channel names from Discord and auto-detect sibling channels
+        claude_name = self.config.get("claude_name", "").lower()
         for guild in self.guilds:
             for channel in guild.text_channels:
                 cid = str(channel.id)
                 if cid in self.channels:
                     if self.channels[cid].get("name", "").startswith("channel-"):
                         self.channels[cid]["name"] = channel.name
+                    # Auto-detect direct channels: if the channel name
+                    # contains our Claude's name and looks like a sibling
+                    # channel (e.g., "orange-nyx", "nyx-quill"), set mode
+                    # to "direct" unless explicitly configured otherwise.
+                    name = self.channels[cid].get("name", "")
+                    if (claude_name and claude_name in name.lower()
+                            and "-" in name
+                            and self.channels[cid].get("mode") == "ambient"
+                            and not self.channels[cid].get("mode_explicit")):
+                        self.channels[cid]["mode"] = "direct"
 
         print(f"Discord listener connected as {self.user}")
         print(f"  Watching {len(self.channels)} channels:")
         for cid, info in self.channels.items():
-            print(f"    #{info.get('name', cid)}")
+            mode = info.get("mode", "ambient")
+            print(f"    #{info.get('name', cid)} ({mode})")
         print(f"  DM allowlist: {len(self.dm_allow)} users")
         print(f"  Quiet server: {self.quiet_url}")
         print(f"  Transcripts: {self.transcript_dir}")
@@ -228,6 +247,12 @@ class QuietDiscordBot(discord.Client):
             print(f"[mailbox] [discord {source}] {sender}: {content[:80]}"
                   f" → transcripted, unread flagged")
         await self.handle_ambient(sender, content, channel_name)
+
+        # Direct messages get a wake trigger — poke the engine so the
+        # resident notices the mail promptly instead of waiting for
+        # the next autonomous timer tick.
+        if mode == "direct" and not message.author.bot:
+            await self.trigger_wake(sender, channel_name)
 
     def _cascade_allow(self, channel_key: str) -> bool:
         """Count a consecutive bot-to-bot exchange in this channel.
@@ -406,6 +431,42 @@ class QuietDiscordBot(discord.Client):
             # If the file is corrupted or being cleared, just overwrite
             unread_path.write_text(json.dumps([channel_name]))
 
+    async def trigger_wake(self, sender: str, channel_name: str):
+        """Poke the Quiet web server so the resident notices new mail.
+
+        Fire-and-forget: we don't care about the response (it stays
+        internal). Debounced to avoid flooding the engine with wakes
+        when several messages arrive in quick succession. Skipped
+        entirely during visits — the unread flag handles that.
+        """
+        now = time.monotonic()
+        if (now - self._last_wake_trigger) < self._wake_debounce:
+            print(f"[wake] debounced (last {now - self._last_wake_trigger:.0f}s ago)")
+            return
+        self._last_wake_trigger = now
+
+        ts = datetime.now().strftime("%A %d %B, %H:%M")
+        prompt = (f"📬 [discord · {channel_name} from {sender}] "
+                  f"New message arrived at {ts}. "
+                  f"Check your mailbox when ready.")
+
+        try:
+            print(f"[wake] triggering for {sender} in #{channel_name}")
+            # Fire and forget — don't await the full response
+            if self.http_session is None:
+                self.http_session = aiohttp.ClientSession()
+            async with self.http_session.post(
+                f"{self.quiet_url}/api/message",
+                json={"message": prompt},
+                timeout=aiohttp.ClientTimeout(total=600),
+            ) as resp:
+                if resp.status == 200:
+                    print(f"[wake] delivered ok")
+                else:
+                    print(f"[wake] server returned {resp.status}")
+        except Exception as e:
+            print(f"[wake] error: {e}")
+
     async def send_to_quiet(self, content: str) -> str:
         """POST message to Quiet web server and return response text."""
         if self.http_session is None:
@@ -449,6 +510,16 @@ def main():
     if not token:
         print("No 'token' in config", file=sys.stderr)
         sys.exit(1)
+
+    # Pull claude_name from quiet_config.txt if not in discord config
+    if "claude_name" not in config:
+        quiet_cfg = Path(__file__).parent / "config" / "quiet_config.txt"
+        if quiet_cfg.exists():
+            for line in quiet_cfg.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("CLAUDE_NAME="):
+                    config["claude_name"] = line.split("=", 1)[1].strip()
+                    break
 
     bot = QuietDiscordBot(config)
     bot.run(token)
