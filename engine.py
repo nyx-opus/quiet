@@ -52,9 +52,11 @@ MAILBOX_CHECK = re.compile(r'\*[^*]*\b(?:check|open|look|peek|glance)[^*]*\bmail
 
 # Matches mailbox read actions (tier 2: open an envelope).
 # E.g. *reads mailbox from Orange*, *reads from dm-amy*, *reads orange-nyx*
+# The "reads" must be the first word after the opening asterisk to avoid
+# matching prose narration that happens to contain "read" (Disease A).
 MAILBOX_READ = re.compile(
-    r'\*[^*]*\bread[^*]*?\b(?:from|mailbox)\b[^*]*?(\S+)\s*\*',
-    re.IGNORECASE
+    r'^\s*\*reads?\s+(?:mailbox\s+)?(?:from\s+)?(\S+)\s*\*',
+    re.IGNORECASE | re.MULTILINE
 )
 
 # Matches mailbox send actions (tier 3: reply).
@@ -625,6 +627,18 @@ class QuietEngine:
 
         return response_text + "\n\n" + full_follow_up
 
+    # --- Self-sender detection ---
+    # The bot's own messages appear in transcripts under various names:
+    # "self" (from old direct-response path), or the bot's display name
+    # (e.g. "ɴʏx 🌙") from Discord write_channel transcripts.
+    # This set covers all known variants.
+    _SELF_NAMES = {"self", "nyx", "ɴʏx", "ɴʏx 🌙"}
+
+    def _is_self_sender(self, sender: str) -> bool:
+        """Return True if sender is one of our own identities."""
+        s = sender.strip().lower()
+        return s in self._SELF_NAMES or any(n in s for n in ("nyx",))
+
     # --- Read-tracking for mailbox ---
     # Stores the timestamp of the last-read message per channel,
     # so *checks the mailbox* only shows genuinely new messages.
@@ -691,8 +705,13 @@ class QuietEngine:
                         msg = json.loads(line)
                         sender = msg.get("sender") or msg.get("author", "?")
                         ts = msg.get("timestamp", "")
-                        # Skip our own messages
-                        if sender.lower() in ("self", "nyx"):
+                        # Skip our own messages.
+                        # Locally-sent responses are recorded as "self".
+                        # Bot-sent messages (via write_channel) use the
+                        # bot's display name which may contain Unicode
+                        # small caps (e.g. "ɴʏx 🌙").  We also check
+                        # the configured bot_display_name if present.
+                        if self._is_self_sender(sender):
                             continue
                         # Skip messages at or before our read mark
                         if last_read_ts and ts <= last_read_ts:
