@@ -668,6 +668,25 @@ class QuietEngine:
         marks[channel] = timestamp
         self._save_read_marks(marks)
 
+    def _clear_unread_flag(self, channel: str):
+        """Remove one channel from unread_channels.json.
+
+        Previously only the tier-1 check cleared the flag file, so
+        reading a channel directly (tier 2) left it flagged forever —
+        a stale [Unread messages in #x] banner on every turn even
+        after the messages had been read.
+        """
+        unread_path = Path(__file__).parent / "unread_channels.json"
+        try:
+            if not unread_path.exists():
+                return
+            channels = set(json.loads(unread_path.read_text()))
+            if channel in channels:
+                channels.discard(channel)
+                unread_path.write_text(json.dumps(sorted(channels)))
+        except (json.JSONDecodeError, OSError):
+            pass
+
     def _mailbox_check(self) -> str:
         """Tier 1: Check the mailbox — see the envelopes.
 
@@ -834,6 +853,8 @@ class QuietEngine:
                     continue
             if last_ts:
                 self._mark_channel_read(channel_name, last_ts)
+            # Reading counts as acknowledging the 📬 for this channel.
+            self._clear_unread_flag(channel_name)
 
             result = f"📬 Messages from {channel_name}:\n" + "\n".join(messages)
             result += (f"\n\n  → To reply: *sends a note to "

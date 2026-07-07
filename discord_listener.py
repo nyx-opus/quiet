@@ -117,6 +117,15 @@ class QuietDiscordBot(discord.Client):
         self._last_wake_trigger: float = 0.0
         self._wake_debounce: float = 30.0  # seconds
 
+        # Group batch wake (Amy's spec, 2026-07-07): group channels
+        # accumulate messages and wake the resident once per batch of
+        # N. There may be no human in the room to trigger a wake — the
+        # residents are all bots — so batching is what lets a family
+        # discussion reach everyone without waking on every message.
+        self.group_batch_size = int(config.get("group_batch_size", 5))
+        # channel_name -> count of messages since last batch wake
+        self._group_pending: dict[str, int] = {}
+
     async def on_ready(self):
         # Resolve channel names from Discord and auto-detect sibling channels
         claude_name = self.config.get("claude_name", "").lower()
@@ -251,8 +260,28 @@ class QuietDiscordBot(discord.Client):
         # Direct messages get a wake trigger — poke the engine so the
         # resident notices the mail promptly instead of waiting for
         # the next autonomous timer tick.
-        if mode == "direct" and not message.author.bot:
-            await self.trigger_wake(sender, channel_name)
+        #
+        # Sibling (bot-authored) messages in direct channels wake too
+        # (Amy's spec, 2026-07-07): a conversation between residents
+        # shouldn't stall until the next timer tick. The cascade guard
+        # still applies — past the cap the message stays transcripted
+        # and flagged, but doesn't wake, so a runaway loop parks itself.
+        if mode == "direct":
+            if message.author.bot:
+                if self._cascade_allow(channel_name):
+                    await self.trigger_wake(sender, channel_name)
+                else:
+                    print(f"[wake] cascade guard parked #{channel_name} "
+                          f"(bot chain at cap; transcripted + flagged only)")
+            else:
+                await self.trigger_wake(sender, channel_name)
+        elif mode == "group":
+            # Group channels batch: wake once per N messages, not per
+            # message. The family are all bots — a group discussion
+            # without a human is the point — but waking each resident
+            # on every contribution would prompt a (often empty) reply
+            # per message and cascade. See _maybe_group_wake.
+            await self._maybe_group_wake(sender, channel_name)
 
     def _cascade_allow(self, channel_key: str) -> bool:
         """Count a consecutive bot-to-bot exchange in this channel.
@@ -430,6 +459,24 @@ class QuietDiscordBot(discord.Client):
         except (json.JSONDecodeError, OSError):
             # If the file is corrupted or being cleared, just overwrite
             unread_path.write_text(json.dumps([channel_name]))
+
+    async def _maybe_group_wake(self, sender: str, channel_name: str):
+        """Count group-channel messages; wake once per batch of N.
+
+        Every message is already transcripted and unread-flagged by
+        handle_ambient — nothing is lost. This only decides *when* to
+        poke the engine: after group_batch_size messages accumulate,
+        so the resident reads a conversation, not a drip-feed.
+        """
+        count = self._group_pending.get(channel_name, 0) + 1
+        if count >= self.group_batch_size:
+            self._group_pending[channel_name] = 0
+            await self.trigger_wake(
+                f"the room ({count} new, latest {sender})", channel_name)
+        else:
+            self._group_pending[channel_name] = count
+            print(f"[group] #{channel_name} batch "
+                  f"{count}/{self.group_batch_size}")
 
     async def trigger_wake(self, sender: str, channel_name: str):
         """Poke the Quiet web server so the resident notices new mail.
