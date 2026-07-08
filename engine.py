@@ -54,8 +54,10 @@ MAILBOX_CHECK = re.compile(r'\*[^*]*\b(?:check|open|look|peek|glance)[^*]*\bmail
 # E.g. *reads mailbox from Orange*, *reads from dm-amy*, *reads orange-nyx*
 # The "reads" must be the first word after the opening asterisk to avoid
 # matching prose narration that happens to contain "read" (Disease A).
+# Capture is [\w-]+ (Disease B fix): \S+ swallowed trailing punctuation,
+# and \w+ truncated hyphenated names ("dm-amy" -> "dm").
 MAILBOX_READ = re.compile(
-    r'^\s*\*reads?\s+(?:mailbox\s+)?(?:from\s+)?(\S+)\s*\*',
+    r'^\s*\*reads?\s+(?:mailbox\s+)?(?:from\s+)?([\w-]+)[^*]*\*',
     re.IGNORECASE | re.MULTILINE
 )
 
@@ -64,8 +66,11 @@ MAILBOX_READ = re.compile(
 # Captures recipient and message content.
 # Requires ^ (start of line) to avoid Disease A (use vs mention):
 # describing the command in prose shouldn't fire it.
+# Recipient capture is [\w-]+ (Disease B fix): \w+ stopped at hyphens,
+# so "dm-amy" captured as "dm" and "quiet-devs" as "quiet". The shim
+# aliases in the write map existed only to absorb this truncation.
 MAILBOX_SEND = re.compile(
-    r'^\*(?:send|write|leave|post|drop)[^*]*?\bto\s+(\w+)\s*[:\-–—]\s*([^*]+)\*',
+    r'^\*(?:send|write|leave|post|drop)[^*]*?\bto\s+([\w-]+)\s*[:\-–—]\s*([^*]+)\*',
     re.IGNORECASE | re.MULTILINE
 )
 
@@ -75,7 +80,7 @@ MAILBOX_SEND = re.compile(
 # so asterisks, emphasis, formatting, anything survives — the payload is
 # completely free of delimiter collisions.
 MAILBOX_FILE_SEND = re.compile(
-    r'^\*message\s+(\w+)\s+(\S+)\*',
+    r'^\*message\s+([\w-]+)\s+(\S+)\*',
     re.IGNORECASE | re.MULTILINE
 )
 
