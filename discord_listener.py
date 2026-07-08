@@ -52,6 +52,59 @@ from discovery import RoutingTable, classify, from_gateway
 # may only move a channel DOWN this ladder (quieter), never up.
 _MODE_RANK = {"ambient": 0, "group": 1, "direct": 2}
 
+# write_channel's name->id resolution map (ClAP format). Generated,
+# never hand-edited: guild channels come from the discovery snapshot,
+# DMs and personal aliases from config/local_channels.json. DMs can't
+# come from guild discovery, and per house policy (Amy, quiet-devs,
+# 2026-07-08) they must never enter anything shared — so the overlay
+# is a local, gitignored file.
+_WRITE_MAP_PATH = (Path.home() / "claude-autonomy-platform"
+                   / "data" / "discord_channels.json")
+_LOCAL_OVERLAY_PATH = Path(__file__).parent / "config" / "local_channels.json"
+
+
+def _generate_write_map(snapshot: dict):
+    """Regenerate write_channel's map from discovery + local overlay.
+
+    The generated map is exactly (snapshot ∪ overlay): guild channels
+    that disappear from the server disappear from the map on the next
+    refresh (no ghost 400s), and anything write_channel should know
+    that discovery can't see (DMs, friendly aliases) must be declared
+    explicitly in the overlay. Extra per-entry fields written by other
+    ClAP tools are preserved for surviving names; only "id" is owned
+    here. Atomic write: tmp file then rename.
+    """
+    merged = dict(snapshot)
+    try:
+        overlay = json.loads(_LOCAL_OVERLAY_PATH.read_text())
+        merged.update(overlay)
+    except FileNotFoundError:
+        pass
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[discovery] local_channels.json unreadable, "
+              f"generating from discovery only: {e}", file=sys.stderr)
+
+    old_entries = {}
+    try:
+        old_entries = json.loads(_WRITE_MAP_PATH.read_text()).get(
+            "channels", {})
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+
+    channels = {}
+    for name, cid in merged.items():
+        entry = dict(old_entries.get(name, {}))
+        entry["id"] = str(cid)
+        channels[name] = entry
+
+    _WRITE_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _WRITE_MAP_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"channels": channels}, indent=2))
+    tmp.rename(_WRITE_MAP_PATH)
+    print(f"[discovery] write map regenerated: {len(channels)} names "
+          f"({len(snapshot)} discovered, {len(merged) - len(snapshot)} "
+          f"from local overlay)")
+
 
 class QuietDiscordBot(discord.Client):
     """Discord bot that bridges Discord and a Quiet session."""
@@ -201,6 +254,7 @@ class QuietDiscordBot(discord.Client):
             snapshot = {name: table[name]["id"] for name in table}
             (routes_path / "discovered_channels.json").write_text(
                 json.dumps(snapshot, indent=2))
+            _generate_write_map(snapshot)
         except OSError as e:
             print(f"[discovery] couldn't persist route snapshot: {e}",
                   file=sys.stderr)

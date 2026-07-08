@@ -51,3 +51,4 @@ static/custom.css
 rag.db
 data/rag.db
 memory.db
+config/local_channels.json

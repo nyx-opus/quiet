@@ -1,0 +1,5 @@
+{
+  "_comment": "Local overlay for the generated write map. DM channels and personal aliases go here — discovery can't see DMs, and per house policy they must never enter anything shared. Format: name -> channel id (string). Copy to local_channels.json.",
+  "dm-<person>": "<dm channel id>",
+  "<friendly-alias>": "<channel id>"
+}
