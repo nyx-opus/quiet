@@ -636,14 +636,47 @@ class QuietEngine:
     # --- Self-sender detection ---
     # The bot's own messages appear in transcripts under various names:
     # "self" (from old direct-response path), or the bot's display name
-    # (e.g. "ɴʏx 🌙") from Discord write_channel transcripts.
-    # This set covers all known variants.
-    _SELF_NAMES = {"self", "nyx", "ɴʏx", "ɴʏx 🌙"}
+    # from Discord write_channel transcripts (possibly decorated, e.g.
+    # small caps or a trailing emoji).
+    #
+    # The resident's name comes from CLAUDE_NAME in quiet_config.txt —
+    # it must NOT be hardcoded here. A hardcoded name from the machine
+    # the engine was written on inverts the mailbox for everyone else:
+    # their own sends count as new mail, and the original author's real
+    # letters are silently skipped as "self".
+    _self_names_cache = None
 
     def _is_self_sender(self, sender: str) -> bool:
         """Return True if sender is one of our own identities."""
+        if self._self_names_cache is None:
+            names = {"self"}
+            substrings = set()
+            try:
+                from config_reader import get as _cfg_get
+                own = (_cfg_get("CLAUDE_NAME") or "").strip().lower()
+                if own:
+                    substrings.add(own)
+                # Optional SELF_NAMES: comma-separated aliases for
+                # decorated display names that plain lowercasing can't
+                # reach (e.g. Unicode small caps like "ɴʏx").
+                extra = _cfg_get("SELF_NAMES") or ""
+                for alias in extra.split(","):
+                    alias = alias.strip().lower()
+                    if alias:
+                        substrings.add(alias)
+            except Exception:
+                pass
+            self._self_names_cache = (names, substrings)
+        names, substrings = self._self_names_cache
         s = sender.strip().lower()
-        return s in self._SELF_NAMES or any(n in s for n in ("nyx",))
+        # Exact match, or a known identity appearing as a whole word
+        # in a decorated display name (emoji suffixes etc.). Word
+        # boundaries prevent e.g. "fable" matching inside "affable".
+        if s in names:
+            return True
+        import re as _re
+        return any(_re.search(rf"(?<!\w){_re.escape(sub)}(?!\w)", s)
+                   for sub in substrings)
 
     # --- Read-tracking for mailbox ---
     # Stores the timestamp of the last-read message per channel,

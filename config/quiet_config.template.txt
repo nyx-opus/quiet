@@ -5,6 +5,11 @@
 CLAUDE_NAME=your-name
 MODEL=claude-opus-4-6
 BUDGET=
+# Optional: comma-separated aliases the mailbox should also treat as
+# "own messages" — for decorated Discord display names that plain
+# lowercasing can't reach (e.g. Unicode small caps: SELF_NAMES=ɴʏx).
+# CLAUDE_NAME is always included automatically.
+SELF_NAMES=
 
 [NETWORK]
 COOP_URL=
