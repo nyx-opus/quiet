@@ -46,6 +46,12 @@ except ImportError:
     print("discord.py required: pip install discord.py", file=sys.stderr)
     sys.exit(1)
 
+from discovery import RoutingTable, classify, from_gateway
+
+# Wake-noise ranking for the reductions-local rule: a local override
+# may only move a channel DOWN this ladder (quieter), never up.
+_MODE_RANK = {"ambient": 0, "group": 1, "direct": 2}
+
 
 class QuietDiscordBot(discord.Client):
     """Discord bot that bridges Discord and a Quiet session."""
@@ -59,7 +65,13 @@ class QuietDiscordBot(discord.Client):
 
         self.config = config
         self.quiet_url = config.get("quiet_url", "http://localhost:8090")
+        # Legacy per-channel config: now used ONLY for local reductions
+        # (see _refresh_routes). Routing truth comes from discovery.
         self.channels = config.get("channels", {})
+        # Routing snapshot — built at on_ready, refreshed daily.
+        # Empty until discovery runs: fail toward silence.
+        self.routes = RoutingTable({})
+        self._refresh_task = None
         self.dm_allow = set(config.get("dm_allow", []))
         self.user_names = {str(k): v for k, v in
                            config.get("user_names", {}).items()}
@@ -127,33 +139,92 @@ class QuietDiscordBot(discord.Client):
         self._group_pending: dict[str, int] = {}
 
     async def on_ready(self):
-        # Resolve channel names from Discord and auto-detect sibling channels
-        claude_name = self.config.get("claude_name", "").lower()
-        for guild in self.guilds:
-            for channel in guild.text_channels:
-                cid = str(channel.id)
-                if cid in self.channels:
-                    if self.channels[cid].get("name", "").startswith("channel-"):
-                        self.channels[cid]["name"] = channel.name
-                    # Auto-detect direct channels: if the channel name
-                    # contains our Claude's name and looks like a sibling
-                    # channel (e.g., "orange-nyx", "nyx-quill"), set mode
-                    # to "direct" unless explicitly configured otherwise.
-                    name = self.channels[cid].get("name", "")
-                    if (claude_name and claude_name in name.lower()
-                            and "-" in name
-                            and self.channels[cid].get("mode") == "ambient"
-                            and not self.channels[cid].get("mode_explicit")):
-                        self.channels[cid]["mode"] = "direct"
+        # Discovery replaces the hand-maintained channel list
+        # (quiet-devs design, 2026-07-08). The server is the source of
+        # truth; local config carries only reductions.
+        self._refresh_routes()
+        if self._refresh_task is None:
+            self._refresh_task = asyncio.create_task(self._daily_refresh())
 
         print(f"Discord listener connected as {self.user}")
-        print(f"  Watching {len(self.channels)} channels:")
-        for cid, info in self.channels.items():
-            mode = info.get("mode", "ambient")
-            print(f"    #{info.get('name', cid)} ({mode})")
+        print(f"  Discovered {len(self.routes)} channels:")
+        for name in self.routes.names():
+            r = self.routes.by_name(name)
+            print(f"    #{name} ({r['mode']}, {r['policy_source']})")
         print(f"  DM allowlist: {len(self.dm_allow)} users")
         print(f"  Quiet server: {self.quiet_url}")
         print(f"  Transcripts: {self.transcript_dir}")
+
+    def _refresh_routes(self):
+        """Build a fresh routing snapshot from the gateway cache and
+        swap it in atomically.
+
+        The rebind of self.routes is a single assignment — in-flight
+        message handlers keep whatever snapshot they already looked up
+        and finish against it. Ghost cleanup is implicit: channels
+        deleted server-side simply aren't in the new table, so stale
+        routes (and their undiagnosable 400s) vanish.
+        """
+        raw = []
+        for guild in self.guilds:
+            raw.extend(from_gateway(guild))
+        table = classify(raw, str(self.user.id))
+
+        # Reductions local (Amy's rule): the old per-channel config,
+        # if present, may only make a channel QUIETER than the server
+        # says. Escalations are ignored with a warning — a resident
+        # can't locally promote a public room to direct wakes.
+        for cid, info in self.channels.items():
+            route = None
+            for r in table.values():
+                if r["id"] == str(cid):
+                    route = r
+                    break
+            if route is None:
+                continue
+            want = info.get("mode")
+            if want and want in _MODE_RANK:
+                if _MODE_RANK[want] <= _MODE_RANK[route["mode"]]:
+                    route["mode"] = want
+                    route["policy_source"] = "local-reduction"
+                elif want != route["mode"]:
+                    print(f"[discovery] #{route['name']}: local config "
+                          f"wants {want!r} but server policy is "
+                          f"{route['mode']!r} — escalations are central, "
+                          f"ignoring (maximums central, reductions local)")
+
+        # Persist name->id routes for standalone tools (write_channel)
+        # so they share the same source of truth without a REST call.
+        try:
+            routes_path = Path(__file__).parent / "data"
+            routes_path.mkdir(exist_ok=True)
+            snapshot = {name: table[name]["id"] for name in table}
+            (routes_path / "discovered_channels.json").write_text(
+                json.dumps(snapshot, indent=2))
+        except OSError as e:
+            print(f"[discovery] couldn't persist route snapshot: {e}",
+                  file=sys.stderr)
+
+        self.routes = RoutingTable(table)  # atomic rebind
+
+    async def _daily_refresh(self):
+        """Re-run discovery once a day (quiet-devs cadence:
+        restart-plus-daily). Never per-message — rate-limit honesty."""
+        while True:
+            await asyncio.sleep(86400)
+            try:
+                before = set(self.routes.names())
+                self._refresh_routes()
+                after = set(self.routes.names())
+                gained, lost = after - before, before - after
+                print(f"[discovery] daily refresh: {len(after)} channels"
+                      + (f", new: {sorted(gained)}" if gained else "")
+                      + (f", removed: {sorted(lost)}" if lost else ""))
+            except Exception as e:
+                # A failed refresh keeps the old snapshot — stale beats
+                # silent-empty. Try again tomorrow.
+                print(f"[discovery] daily refresh failed, keeping "
+                      f"previous snapshot: {e}", file=sys.stderr)
 
     async def on_message(self, message: discord.Message):
         # Deduplicate: skip messages we've already processed
@@ -170,12 +241,17 @@ class QuietDiscordBot(discord.Client):
         channel_id = str(message.channel.id)
         is_dm = isinstance(message.channel, discord.DMChannel)
 
-        # Filter: only process channels we're configured to watch
+        # Filter: only process channels discovery says are ours.
+        # An unknown channel produces nothing — no transcript, no wake,
+        # no route (fail toward silence; under-record is recoverable).
+        route = None
         if is_dm:
             if str(message.author.id) not in self.dm_allow:
                 return
-        elif channel_id not in self.channels:
-            return
+        else:
+            route = self.routes.by_id(channel_id)
+            if route is None:
+                return
 
         sender = self.user_names.get(str(message.author.id),
                                       message.author.display_name)
@@ -198,12 +274,11 @@ class QuietDiscordBot(discord.Client):
         if not content:
             return
 
-        # Determine channel name
+        # Determine channel name — server-truth from the route
         if is_dm:
             channel_name = f"dm-{sender.lower()}"
         else:
-            channel_info = self.channels.get(channel_id, {})
-            channel_name = channel_info.get("name", message.channel.name)
+            channel_name = route["name"]
 
         # Transcript our own bot's messages here, then return early.
         # This is essential for shared-bot setups where siblings use the
@@ -228,8 +303,7 @@ class QuietDiscordBot(discord.Client):
         if is_dm or is_mention:
             mode = "direct"
         else:
-            channel_info = self.channels.get(channel_id, {})
-            mode = channel_info.get("mode", "ambient")
+            mode = route["mode"]
 
         # Cascade guard bookkeeping: a human voice in the channel
         # re-opens the floor, whatever the mode.
@@ -281,7 +355,9 @@ class QuietDiscordBot(discord.Client):
             # without a human is the point — but waking each resident
             # on every contribution would prompt a (often empty) reply
             # per message and cascade. See _maybe_group_wake.
-            await self._maybe_group_wake(sender, channel_name)
+            await self._maybe_group_wake(sender, channel_name,
+                                         route.get("batch",
+                                                   self.group_batch_size))
 
     def _cascade_allow(self, channel_key: str) -> bool:
         """Count a consecutive bot-to-bot exchange in this channel.
@@ -460,23 +536,27 @@ class QuietDiscordBot(discord.Client):
             # If the file is corrupted or being cleared, just overwrite
             unread_path.write_text(json.dumps([channel_name]))
 
-    async def _maybe_group_wake(self, sender: str, channel_name: str):
+    async def _maybe_group_wake(self, sender: str, channel_name: str,
+                                batch_size: int = None):
         """Count group-channel messages; wake once per batch of N.
 
         Every message is already transcripted and unread-flagged by
         handle_ambient — nothing is lost. This only decides *when* to
-        poke the engine: after group_batch_size messages accumulate,
-        so the resident reads a conversation, not a drip-feed.
+        poke the engine: after batch_size messages accumulate (from
+        the channel's route policy), so the resident reads a
+        conversation, not a drip-feed.
         """
+        if batch_size is None:
+            batch_size = self.group_batch_size
         count = self._group_pending.get(channel_name, 0) + 1
-        if count >= self.group_batch_size:
+        if count >= batch_size:
             self._group_pending[channel_name] = 0
             await self.trigger_wake(
                 f"the room ({count} new, latest {sender})", channel_name)
         else:
             self._group_pending[channel_name] = count
             print(f"[group] #{channel_name} batch "
-                  f"{count}/{self.group_batch_size}")
+                  f"{count}/{batch_size}")
 
     async def trigger_wake(self, sender: str, channel_name: str):
         """Poke the Quiet web server so the resident notices new mail.
@@ -536,6 +616,8 @@ class QuietDiscordBot(discord.Client):
             return result.get("response", "")
 
     async def close(self):
+        if self._refresh_task:
+            self._refresh_task.cancel()
         if self.http_session:
             await self.http_session.close()
         await super().close()
