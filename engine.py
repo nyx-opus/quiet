@@ -764,12 +764,15 @@ class QuietEngine:
                         sender = msg.get("sender") or msg.get("author", "?")
                         ts = msg.get("timestamp", "")
                         # Skip our own messages.
-                        # Locally-sent responses are recorded as "self".
-                        # Bot-sent messages (via write_channel) use the
-                        # bot's display name which may contain Unicode
-                        # small caps (e.g. "ɴʏx 🌙").  We also check
-                        # the configured bot_display_name if present.
-                        if self._is_self_sender(sender):
+                        # New transcript lines carry a "self" field
+                        # stamped by the listener at write time from
+                        # the bot ID — authoritative when present, no
+                        # name matching involved. Legacy lines (no
+                        # field) fall back to the name heuristic.
+                        self_flag = msg.get("self")
+                        if self_flag is True:
+                            continue
+                        if self_flag is None and self._is_self_sender(sender):
                             continue
                         # Skip messages at or before our read mark
                         if last_read_ts and ts <= last_read_ts:

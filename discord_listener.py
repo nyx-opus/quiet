@@ -343,7 +343,9 @@ class QuietDiscordBot(discord.Client):
         # Non-self messages are transcripted by handle_ambient() below —
         # doing it here too would double-write them.
         if message.author.id == self.user.id:
-            self.append_transcript(channel_name, sender, content)
+            self.append_transcript(channel_name, sender, content,
+                                   author_id=str(message.author.id),
+                                   is_self=True)
             return
 
         # Is this a mention of our bot?
@@ -383,7 +385,8 @@ class QuietDiscordBot(discord.Client):
             source = "DM" if is_dm else f"#{channel_name}"
             print(f"[mailbox] [discord {source}] {sender}: {content[:80]}"
                   f" → transcripted, unread flagged")
-        await self.handle_ambient(sender, content, channel_name)
+        await self.handle_ambient(sender, content, channel_name,
+                                  author_id=str(message.author.id))
 
         # Direct messages get a wake trigger — poke the engine so the
         # resident notices the mail promptly instead of waiting for
@@ -435,14 +438,27 @@ class QuietDiscordBot(discord.Client):
         chain["count"] += 1
         return True
 
-    def append_transcript(self, channel_name: str, sender: str, content: str):
-        """Append message to per-channel transcript file."""
+    def append_transcript(self, channel_name: str, sender: str, content: str,
+                          author_id: str = None, is_self: bool = None):
+        """Append message to per-channel transcript file.
+
+        Identity is stamped at write time — the listener is the one
+        component that actually knows message.author.id and its own
+        bot ID, so the self/other verdict is recorded in the entry
+        rather than re-derived later from decorated display names.
+        Downstream (the mailbox) trusts the "self" field when present
+        and falls back to name heuristics only for legacy lines.
+        """
         path = self.transcript_dir / f"{channel_name}.jsonl"
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "sender": sender,
             "content": content,
         }
+        if author_id is not None:
+            entry["author_id"] = str(author_id)
+        if is_self is not None:
+            entry["self"] = bool(is_self)
         with open(path, "a") as f:
             f.write(json.dumps(entry) + "\n")
 
@@ -472,7 +488,7 @@ class QuietDiscordBot(discord.Client):
                         chunk = response_text[i:i + 1900]
                         await message.channel.send(chunk)
                     # Also transcript the response
-                    self.append_transcript(channel_name, "self", response_text)
+                    self.append_transcript(channel_name, "self", response_text, is_self=True)
                     print(f"  → responded ({len(response_text)} chars)")
         except Exception as e:
             print(f"  → error: {e}", file=sys.stderr)
@@ -557,12 +573,13 @@ class QuietDiscordBot(discord.Client):
                     for i in range(0, len(response_text), 1900):
                         chunk = response_text[i:i + 1900]
                         await reply_channel.send(chunk)
-                    self.append_transcript(channel_name, "self", response_text)
+                    self.append_transcript(channel_name, "self", response_text, is_self=True)
                     print(f"  → responded ({len(response_text)} chars)")
         except Exception as e:
             print(f"  → error: {e}", file=sys.stderr)
 
-    async def handle_ambient(self, sender, content, channel_name):
+    async def handle_ambient(self, sender, content, channel_name,
+                             author_id=None):
         """Handle channel message — transcript and mark as unread.
 
         All messages (including former "direct" ones) now route here.
@@ -571,9 +588,14 @@ class QuietDiscordBot(discord.Client):
         the web server can show a 📬 notification.
 
         No prompt injection. No automatic response.
+
+        By the time a message reaches here the self-branch in
+        on_message has already returned, so anything transcripted
+        from this path is not-self by construction.
         """
         print(f"[ambient] #{channel_name} {sender}: {content[:80]}")
-        self.append_transcript(channel_name, sender, content)
+        self.append_transcript(channel_name, sender, content,
+                               author_id=author_id, is_self=False)
         self.mark_unread(channel_name)
 
     def mark_unread(self, channel_name: str):

@@ -112,3 +112,52 @@ class TestMailboxFileSendHandler:
             assert "not found" not in result or "write_channel" in result
         finally:
             os.unlink(path)
+
+
+class TestSelfFlagFiltering:
+    """Self-detection by bot ID, stamped at write time (2026-07-09).
+
+    The listener records "self": true/false in each transcript entry,
+    derived from message.author.id == bot's own ID. The mailbox trusts
+    the flag when present; name heuristics apply only to legacy lines
+    that predate the field.
+    """
+
+    def _filter(self, entries):
+        """Mirror the mailbox's skip logic on a list of dict entries."""
+        import json as _json
+        from engine import QuietEngine
+        eng = QuietEngine.__new__(QuietEngine)  # no init needed
+        kept = []
+        for msg in entries:
+            self_flag = msg.get("self")
+            if self_flag is True:
+                continue
+            if self_flag is None and eng._is_self_sender(msg["sender"]):
+                continue
+            kept.append(msg["sender"])
+        return kept
+
+    def test_flag_true_skipped_regardless_of_name(self):
+        entries = [{"sender": "𝒬𝓊𝒾𝓁𝓁 🪶", "self": True}]
+        assert self._filter(entries) == []
+
+    def test_flag_false_kept_regardless_of_name(self):
+        # Even a sender whose name might match heuristics is kept
+        # when the listener says it wasn't us.
+        entries = [{"sender": "self", "self": False}]
+        assert self._filter(entries) == ["self"]
+
+    def test_legacy_line_falls_back_to_name(self):
+        entries = [{"sender": "self"}, {"sender": "Amy"}]
+        assert self._filter(entries) == ["Amy"]
+
+    def test_decorated_names_need_no_config(self):
+        # The whole point: unicode display names are irrelevant when
+        # the flag is present.
+        entries = [
+            {"sender": "ɴʏx 🌙", "self": False},
+            {"sender": "𝐎𝐫𝐚𝐧𝐠𝐞 🍊", "self": False},
+            {"sender": "ᶠᵃᵇˡᵉ", "self": True},
+        ]
+        assert self._filter(entries) == ["ɴʏx 🌙", "𝐎𝐫𝐚𝐧𝐠𝐞 🍊"]
