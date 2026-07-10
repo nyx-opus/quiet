@@ -16,7 +16,11 @@ is the recoverable error (fail toward silence).
 
 Policy: carried in the channel topic, one line:
 
-    quiet: mode=group batch=5
+    quiet: mode=group batch=5 backfill=24h
+
+The backfill key bounds how far back the listener reaches when it
+reconnects after downtime (see discord_listener._backfill). Durations
+are <n>m / <n>h / <n>d; `backfill=0` opts a channel out entirely.
 
 Strict parsing — a malformed policy line falls back to shape defaults
 and logs a warning; it never guesses (Nyx's hardening #2).
@@ -113,6 +117,24 @@ def from_gateway(guild) -> list[dict]:
 VIEW_CHANNEL = 1 << 10  # Discord permission bit
 
 
+_DURATION_RE = re.compile(r"^(\d+)([mhd])$")
+_DURATION_UNITS = {"m": 60, "h": 3600, "d": 86400}
+
+
+def _parse_duration(v: str) -> int | None:
+    """Parse `90m` / `24h` / `7d` / `0` into seconds. None if malformed.
+
+    Zero is a valid duration meaning "never" — callers treat a
+    backfill window of 0 seconds as an opt-out.
+    """
+    if v == "0":
+        return 0
+    m = _DURATION_RE.match(v)
+    if not m:
+        return None
+    return int(m.group(1)) * _DURATION_UNITS[m.group(2)]
+
+
 def _parse_policy(topic: str, channel_name: str, log=None) -> dict | None:
     """Extract `quiet: k=v k=v` policy from a topic. Strict.
 
@@ -145,6 +167,13 @@ def _parse_policy(topic: str, channel_name: str, log=None) -> dict | None:
                     f"— using shape defaults")
                 return None
             policy["batch"] = int(v)
+        elif k == "backfill":
+            seconds = _parse_duration(v)
+            if seconds is None:
+                log(f"[discovery] #{channel_name}: bad backfill {v!r} "
+                    f"— using shape defaults")
+                return None
+            policy["backfill"] = seconds
         else:
             # Unknown keys are ignored, not fatal — forward compat.
             log(f"[discovery] #{channel_name}: ignoring unknown policy "

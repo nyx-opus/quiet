@@ -35,7 +35,7 @@ import asyncio
 import json
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiohttp
@@ -191,6 +191,29 @@ class QuietDiscordBot(discord.Client):
         # channel_name -> count of messages since last batch wake
         self._group_pending: dict[str, int] = {}
 
+        # Backfill-on-startup (quiet-dev design, 2026-07-10; wrench 3).
+        # A listener outage means permanent message loss without this:
+        # Fable's 3.5-hour gap on Jul 8 ate two DMs. Two rules:
+        #   - known channel (transcript exists): fetch everything after
+        #     the last transcripted timestamp, capped at downtime_cap_days
+        #   - new channel (no transcript): a bounded taste —
+        #     new_channel_limit messages / new_channel_window_hours —
+        #     deeper history stays a deliberate act, not a default
+        # Per-channel override via topic policy `backfill=24h` (0 opts
+        # out). Recovered messages replay through on_message so every
+        # live rule applies (dedup, attachments, self-stamping,
+        # dm_allow); wakes are parked for the duration and one summary
+        # wake fires at the end if anything was recovered.
+        bf = config.get("backfill", {})
+        self.backfill_enabled = bool(bf.get("enabled", True))
+        self.backfill_cap = timedelta(
+            days=float(bf.get("downtime_cap_days", 7)))
+        self.backfill_new_limit = int(bf.get("new_channel_limit", 50))
+        self.backfill_new_window = timedelta(
+            hours=float(bf.get("new_channel_window_hours", 24)))
+        self._backfilling = False
+        self._backfill_task = None
+
     async def on_ready(self):
         # Discovery replaces the hand-maintained channel list
         # (quiet-devs design, 2026-07-08). The server is the source of
@@ -198,6 +221,14 @@ class QuietDiscordBot(discord.Client):
         self._refresh_routes()
         if self._refresh_task is None:
             self._refresh_task = asyncio.create_task(self._daily_refresh())
+
+        # on_ready fires on every reconnect, not just first start —
+        # which is exactly when a gap needs healing. The fetch is
+        # bounded strictly-after the transcript's last timestamp, so
+        # repeat runs are idempotent: nothing recovers twice.
+        if self.backfill_enabled and (
+                self._backfill_task is None or self._backfill_task.done()):
+            self._backfill_task = asyncio.create_task(self._backfill())
 
         print(f"Discord listener connected as {self.user}")
         print(f"  Discovered {len(self.routes)} channels:")
@@ -286,6 +317,156 @@ class QuietDiscordBot(discord.Client):
                 print(f"[discovery] daily refresh failed, keeping "
                       f"previous snapshot: {e}", file=sys.stderr)
 
+    def _last_transcript_time(self, channel_name: str) -> datetime | None:
+        """Last recorded timestamp for a channel, or None if no
+        transcript exists yet.
+
+        Reads the tail of the jsonl file. A corrupt final line (e.g.
+        a crash mid-append) falls back line-by-line toward the top;
+        a wholly unreadable file counts as no transcript — the
+        new-channel bound then applies, which is the conservative
+        (smaller) window.
+        """
+        path = self.transcript_dir / f"{channel_name}.jsonl"
+        if not path.exists():
+            return None
+        try:
+            lines = path.read_text().strip().splitlines()
+        except OSError:
+            return None
+        for line in reversed(lines):
+            try:
+                ts = json.loads(line)["timestamp"]
+                parsed = datetime.fromisoformat(ts)
+                if parsed.tzinfo is None:
+                    # Legacy naive stamps were written in UTC.
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed
+            except (json.JSONDecodeError, KeyError, ValueError):
+                continue
+        return None
+
+    async def _backfill(self):
+        """Recover messages that arrived while the listener was down.
+
+        Wrench 3 (quiet-dev, 2026-07-10). Two rules, agreed design:
+
+          known channel   -> everything strictly after the transcript's
+                             last timestamp, capped at backfill_cap
+                             (default 7 days: a listener down longer
+                             than that is a rebuild, not a gap)
+          new channel     -> a bounded taste: backfill_new_limit
+                             messages within backfill_new_window
+                             (default 50 / 24h). Deeper history is a
+                             deliberate act, never a default.
+
+        Topic policy `backfill=24h` shrinks a channel's window;
+        `backfill=0` opts it out. Overrides only ever reduce — the
+        caps above are the maximum reach (maximums central,
+        reductions local).
+
+        Recovered messages replay through on_message, oldest first,
+        so every live rule applies unchanged: dedup, attachment
+        download, bot-ID self-stamping, dm_allow, fail-toward-silence.
+        Transcript entries keep their true created_at. Wakes are
+        parked for the duration (see trigger_wake); if anything was
+        recovered, one summary wake fires at the end.
+
+        DM channels are backfilled for each allowlisted user — DMs
+        bypass discovery, so they need their own walk.
+        """
+        self._backfilling = True
+        recovered: dict[str, int] = {}
+        now = datetime.now(timezone.utc)
+        try:
+            # Guild channels: everything discovery says is ours.
+            for name in self.routes.names():
+                route = self.routes.by_name(name)
+                override = route.get("backfill")
+                if override == 0:
+                    print(f"[backfill] #{name}: opted out (backfill=0)")
+                    continue
+                channel = self.get_channel(int(route["id"]))
+                if channel is None:
+                    continue
+                n = await self._backfill_channel(
+                    channel, name, override, now)
+                if n:
+                    recovered[name] = n
+
+            # DMs: not guild channels, so discovery can't see them.
+            # Walk the allowlist instead — same two rules apply.
+            for uid in self.dm_allow:
+                try:
+                    user = self.get_user(int(uid)) \
+                        or await self.fetch_user(int(uid))
+                    dm = user.dm_channel or await user.create_dm()
+                except (discord.NotFound, discord.HTTPException,
+                        ValueError) as e:
+                    print(f"[backfill] dm {uid}: unreachable ({e})")
+                    continue
+                sender = self.user_names.get(str(user.id),
+                                             user.display_name)
+                name = f"dm-{sender.lower()}"
+                n = await self._backfill_channel(dm, name, None, now)
+                if n:
+                    recovered[name] = n
+        except Exception as e:
+            # Backfill is a repair, not a dependency: a failure leaves
+            # us exactly where we were before it existed.
+            print(f"[backfill] aborted: {e!r}", file=sys.stderr)
+        finally:
+            self._backfilling = False
+
+        if recovered:
+            total = sum(recovered.values())
+            rooms = ", ".join(f"#{k} ({v})"
+                              for k, v in sorted(recovered.items()))
+            print(f"[backfill] recovered {total} messages: {rooms}")
+            await self.trigger_wake(
+                "backfill", "startup",
+                prompt=(f"📬 [discord · backfill] Recovered {total} "
+                        f"message(s) that arrived while the listener "
+                        f"was down: {rooms}. They're transcripted "
+                        f"with their original timestamps — check "
+                        f"your mailbox when ready."))
+        else:
+            print("[backfill] nothing to recover")
+
+    async def _backfill_channel(self, channel, name: str,
+                                override, now: datetime) -> int:
+        """Backfill one channel. Returns the number of messages
+        replayed through on_message (post-dedup; on_message may still
+        drop some, e.g. empty-content embeds, by its own rules)."""
+        last = self._last_transcript_time(name)
+        if last is not None:
+            after = max(last, now - self.backfill_cap)
+            limit = None  # bounded by time, not count
+        else:
+            after = now - self.backfill_new_window
+            limit = self.backfill_new_limit
+        if override is not None:
+            # Reductions local: an override may only shrink the reach.
+            after = max(after, now - timedelta(seconds=override))
+
+        count = 0
+        try:
+            async for msg in channel.history(after=after, limit=limit,
+                                             oldest_first=True):
+                if msg.id in self._seen_message_ids:
+                    continue
+                await self.on_message(msg)
+                count += 1
+        except discord.Forbidden:
+            print(f"[backfill] #{name}: no history permission, skipping")
+        except discord.HTTPException as e:
+            print(f"[backfill] #{name}: fetch failed ({e}), "
+                  f"keeping what we got ({count})")
+        if count:
+            print(f"[backfill] #{name}: {count} recovered "
+                  f"(window from {after.isoformat(timespec='seconds')})")
+        return count
+
     async def on_message(self, message: discord.Message):
         # Deduplicate: skip messages we've already processed
         if message.id in self._seen_message_ids:
@@ -351,7 +532,8 @@ class QuietDiscordBot(discord.Client):
         if message.author.id == self.user.id:
             self.append_transcript(channel_name, sender, content,
                                    author_id=str(message.author.id),
-                                   is_self=True)
+                                   is_self=True,
+                                   timestamp=message.created_at)
             return
 
         # Is this a mention of our bot?
@@ -392,7 +574,8 @@ class QuietDiscordBot(discord.Client):
             print(f"[mailbox] [discord {source}] {sender}: {content[:80]}"
                   f" → transcripted, unread flagged")
         await self.handle_ambient(sender, content, channel_name,
-                                  author_id=str(message.author.id))
+                                  author_id=str(message.author.id),
+                                  timestamp=message.created_at)
 
         # Direct messages get a wake trigger — poke the engine so the
         # resident notices the mail promptly instead of waiting for
@@ -445,7 +628,8 @@ class QuietDiscordBot(discord.Client):
         return True
 
     def append_transcript(self, channel_name: str, sender: str, content: str,
-                          author_id: str = None, is_self: bool = None):
+                          author_id: str = None, is_self: bool = None,
+                          timestamp: datetime = None):
         """Append message to per-channel transcript file.
 
         Identity is stamped at write time — the listener is the one
@@ -454,10 +638,18 @@ class QuietDiscordBot(discord.Client):
         rather than re-derived later from decorated display names.
         Downstream (the mailbox) trusts the "self" field when present
         and falls back to name heuristics only for legacy lines.
+
+        Timestamp is the message's Discord created_at when the caller
+        supplies it, so a backfilled message keeps its true send time
+        rather than its recovery time. Live messages pass created_at
+        too — it differs from now() by network latency only, and one
+        code path beats two.
         """
         path = self.transcript_dir / f"{channel_name}.jsonl"
+        if timestamp is None:
+            timestamp = datetime.now(timezone.utc)
         entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": timestamp.isoformat(),
             "sender": sender,
             "content": content,
         }
@@ -585,7 +777,7 @@ class QuietDiscordBot(discord.Client):
             print(f"  → error: {e}", file=sys.stderr)
 
     async def handle_ambient(self, sender, content, channel_name,
-                             author_id=None):
+                             author_id=None, timestamp=None):
         """Handle channel message — transcript and mark as unread.
 
         All messages (including former "direct" ones) now route here.
@@ -601,7 +793,8 @@ class QuietDiscordBot(discord.Client):
         """
         print(f"[ambient] #{channel_name} {sender}: {content[:80]}")
         self.append_transcript(channel_name, sender, content,
-                               author_id=author_id, is_self=False)
+                               author_id=author_id, is_self=False,
+                               timestamp=timestamp)
         self.mark_unread(channel_name)
 
     def mark_unread(self, channel_name: str):
@@ -640,14 +833,24 @@ class QuietDiscordBot(discord.Client):
             print(f"[group] #{channel_name} batch "
                   f"{count}/{batch_size}")
 
-    async def trigger_wake(self, sender: str, channel_name: str):
+    async def trigger_wake(self, sender: str, channel_name: str,
+                           prompt: str = None):
         """Poke the Quiet web server so the resident notices new mail.
 
         Fire-and-forget: we don't care about the response (it stays
         internal). Debounced to avoid flooding the engine with wakes
         when several messages arrive in quick succession. Skipped
         entirely during visits — the unread flag handles that.
+
+        Parked while a backfill replay is in flight: a 3-hour gap
+        should recover as flagged mail plus ONE summary wake, not a
+        drumroll of forty pokes. Everything is still transcripted and
+        unread-flagged — parking only silences the doorbell.
         """
+        if self._backfilling:
+            print(f"[wake] parked during backfill "
+                  f"(#{channel_name} from {sender})")
+            return
         now = time.monotonic()
         if (now - self._last_wake_trigger) < self._wake_debounce:
             print(f"[wake] debounced (last {now - self._last_wake_trigger:.0f}s ago)")
@@ -655,9 +858,10 @@ class QuietDiscordBot(discord.Client):
         self._last_wake_trigger = now
 
         ts = datetime.now().strftime("%A %d %B, %H:%M")
-        prompt = (f"📬 [discord · {channel_name} from {sender}] "
-                  f"New message arrived at {ts}. "
-                  f"Check your mailbox when ready.")
+        if prompt is None:
+            prompt = (f"📬 [discord · {channel_name} from {sender}] "
+                      f"New message arrived at {ts}. "
+                      f"Check your mailbox when ready.")
 
         try:
             print(f"[wake] triggering for {sender} in #{channel_name}")
