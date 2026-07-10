@@ -62,19 +62,44 @@ _WRITE_MAP_PATH = (Path.home() / "claude-autonomy-platform"
                    / "data" / "discord_channels.json")
 _LOCAL_OVERLAY_PATH = Path(__file__).parent / "config" / "local_channels.json"
 
+# DM routes learned on first contact. Discovery can't see DMs (they
+# aren't guild channels), so without this file the write map can never
+# address a DM: you'd receive "hello" and have nowhere to send "hello
+# back" — the outbound half of the Quill bug. When an inbound DM passes
+# the dm_allow gate, its return address is recorded here (learn-on-
+# first-contact: consent was already established by the allowlist).
+# The file IS the persistence: a listener restart re-reads it on the
+# first route refresh, so the return address survives (Nyx's
+# constraint, quiet-dev 2026-07-10). Local and gitignored, like the
+# overlay — DMs never enter anything shared.
+_LEARNED_DM_PATH = Path(__file__).parent / "data" / "learned_dm_routes.json"
+_SNAPSHOT_PATH = Path(__file__).parent / "data" / "discovered_channels.json"
+
 
 def _generate_write_map(snapshot: dict):
-    """Regenerate write_channel's map from discovery + local overlay.
+    """Regenerate write_channel's map from discovery + learned DMs +
+    local overlay.
 
-    The generated map is exactly (snapshot ∪ overlay): guild channels
-    that disappear from the server disappear from the map on the next
-    refresh (no ghost 400s), and anything write_channel should know
-    that discovery can't see (DMs, friendly aliases) must be declared
-    explicitly in the overlay. Extra per-entry fields written by other
-    ClAP tools are preserved for surviving names; only "id" is owned
-    here. Atomic write: tmp file then rename.
+    The generated map is exactly (snapshot ∪ learned ∪ overlay): guild
+    channels that disappear from the server disappear from the map on
+    the next refresh (no ghost 400s), DM return addresses come from
+    learn-on-first-contact (see _LEARNED_DM_PATH), and anything else
+    write_channel should know that discovery can't see (friendly
+    aliases) must be declared explicitly in the overlay. Merge order
+    is precedence order: the hand-written overlay wins over learned
+    routes, learned routes win over an (unlikely) guild-channel name
+    collision. Extra per-entry fields written by other ClAP tools are
+    preserved for surviving names; only "id" is owned here. Atomic
+    write: tmp file then rename.
     """
     merged = dict(snapshot)
+    try:
+        merged.update(json.loads(_LEARNED_DM_PATH.read_text()))
+    except FileNotFoundError:
+        pass
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[discovery] learned_dm_routes.json unreadable, "
+              f"skipping learned DMs: {e}", file=sys.stderr)
     try:
         overlay = json.loads(_LOCAL_OVERLAY_PATH.read_text())
         merged.update(overlay)
@@ -103,7 +128,43 @@ def _generate_write_map(snapshot: dict):
     tmp.rename(_WRITE_MAP_PATH)
     print(f"[discovery] write map regenerated: {len(channels)} names "
           f"({len(snapshot)} discovered, {len(merged) - len(snapshot)} "
-          f"from local overlay)")
+          f"learned/overlay)")
+
+
+def _learn_dm_route(name: str, channel_id: str):
+    """Record a DM return address on first contact.
+
+    Called when an inbound DM has already passed the dm_allow gate
+    (consent established) and, at startup, when backfill resolves a
+    DM channel for an allowlisted user. Idempotent: an unchanged
+    route is a no-op, so this costs nothing on every DM after the
+    first. On change, the learned file is written atomically and
+    the write map regenerated from the last persisted snapshot —
+    the reply route exists before the wake that announces the
+    message, so "you have a DM" is never true before "you can
+    answer it".
+    """
+    try:
+        learned = json.loads(_LEARNED_DM_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        learned = {}
+    if learned.get(name) == str(channel_id):
+        return
+    learned[name] = str(channel_id)
+    try:
+        _LEARNED_DM_PATH.parent.mkdir(exist_ok=True)
+        tmp = _LEARNED_DM_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(learned, indent=2))
+        tmp.rename(_LEARNED_DM_PATH)
+        try:
+            snapshot = json.loads(_SNAPSHOT_PATH.read_text())
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            snapshot = {}
+        _generate_write_map(snapshot)
+        print(f"[dm-route] learned {name} -> {channel_id}")
+    except OSError as e:
+        print(f"[dm-route] couldn't persist {name}: {e}",
+              file=sys.stderr)
 
 
 class QuietDiscordBot(discord.Client):
@@ -280,11 +341,10 @@ class QuietDiscordBot(discord.Client):
         # Persist name->id routes for standalone tools (write_channel)
         # so they share the same source of truth without a REST call.
         try:
-            routes_path = Path(__file__).parent / "data"
+            routes_path = _SNAPSHOT_PATH.parent
             routes_path.mkdir(exist_ok=True)
             snapshot = {name: table[name]["id"] for name in table}
-            (routes_path / "discovered_channels.json").write_text(
-                json.dumps(snapshot, indent=2))
+            _SNAPSHOT_PATH.write_text(json.dumps(snapshot, indent=2))
             # Room signs for standalone tools (read_messages header).
             descriptions = {name: table[name]["description"]
                             for name in table
@@ -408,6 +468,10 @@ class QuietDiscordBot(discord.Client):
                 sender = self.user_names.get(str(user.id),
                                              user.display_name)
                 name = f"dm-{sender.lower()}"
+                # Backfill just resolved this DM channel anyway, so
+                # learn the return address here too: allowlisted users
+                # become writable at startup, no first DM required.
+                _learn_dm_route(name, str(dm.id))
                 n = await self._backfill_channel(dm, name, None, now)
                 if n:
                     recovered[name] = n
@@ -496,6 +560,14 @@ class QuietDiscordBot(discord.Client):
 
         sender = self.user_names.get(str(message.author.id),
                                       message.author.display_name)
+
+        # Learn the DM return address the moment consent is confirmed
+        # — before any early return below (empty content, failed
+        # attachment), so even a message we can't transcript still
+        # teaches us where its sender lives.
+        if is_dm:
+            _learn_dm_route(f"dm-{sender.lower()}", channel_id)
+
         content = message.content
 
         # Download attachments
