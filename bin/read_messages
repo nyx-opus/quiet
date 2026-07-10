@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""
+Read messages from Quiet's local Discord transcripts.
+
+Quiet-native replacement for the ClAP read_messages script.  The ClAP
+version resolves transcripts against ~/claude-autonomy-platform/data/
+transcripts/ and speaks ClAP's transcript dialect (`author` field,
+message-id read marks in discord_channels.json).  Quiet's listener
+writes to <quiet>/transcripts/ and speaks Quiet's dialect (`sender`
+field with `author` fallback, timestamp read marks in
+mailbox_read_marks.json, notification flags in unread_channels.json).
+
+This tool shares its state files — and therefore its semantics — with
+the engine's mailbox verbs, so a read from the command line and a read
+from inside a session agree about what has been seen.
+
+Usage:
+    read_messages <channel> [limit]     # last N messages (default 25)
+    read_messages <channel> --unread    # only messages since read mark
+    read_messages <channel> --no-mark   # read without marking as read
+    read_messages --list                # list available channels
+"""
+
+import sys
+import json
+import argparse
+from pathlib import Path
+from datetime import datetime
+
+# All paths resolve relative to the Quiet install this script lives in.
+QUIET_ROOT = Path(__file__).resolve().parent.parent
+TRANSCRIPT_DIR = QUIET_ROOT / "transcripts"
+READ_MARKS_PATH = QUIET_ROOT / "mailbox_read_marks.json"
+UNREAD_FLAGS_PATH = QUIET_ROOT / "unread_channels.json"
+
+
+def load_json(path, default):
+    try:
+        if path.exists():
+            return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        pass
+    return default
+
+
+def list_channels():
+    print("📋 Channels with transcripts:")
+    if not TRANSCRIPT_DIR.exists():
+        print(f"❌ No transcripts directory at {TRANSCRIPT_DIR}")
+        return
+    files = sorted(TRANSCRIPT_DIR.glob("*.jsonl"))
+    if not files:
+        print("  (No transcripts yet)")
+        return
+    read_marks = load_json(READ_MARKS_PATH, {})
+    for f in files:
+        channel = f.stem
+        try:
+            count = sum(1 for line in open(f) if line.strip())
+        except OSError as e:
+            print(f"  • {channel} (error: {e})")
+            continue
+        mark = read_marks.get(channel)
+        marked = f", read to {mark[:16]}" if mark else ", never read"
+        print(f"  • {channel} ({count} messages{marked})")
+
+
+def resolve_channel(hint):
+    """Match a channel hint against transcript stems.
+
+    Exact match first, then unique substring match.  Ambiguous or
+    unknown hints fail with the list of candidates — never guess.
+    """
+    hint = hint.strip().lower()
+    exact = TRANSCRIPT_DIR / f"{hint}.jsonl"
+    if exact.exists():
+        return exact
+    candidates = [p for p in TRANSCRIPT_DIR.glob("*.jsonl")
+                  if hint in p.stem.lower()]
+    if len(candidates) == 1:
+        return candidates[0]
+    if candidates:
+        names = ", ".join(sorted(p.stem for p in candidates))
+        print(f"❌ Ambiguous channel '{hint}' — matches: {names}")
+    else:
+        names = ", ".join(sorted(p.stem for p in TRANSCRIPT_DIR.glob("*.jsonl")))
+        print(f"❌ No channel matching '{hint}'. Available: {names}")
+    return None
+
+
+def read_transcript(path, limit, unread_only):
+    """Return (messages, skipped_count). Skips corrupt lines gracefully."""
+    messages, skipped = [], 0
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                messages.append(json.loads(line))
+            except json.JSONDecodeError:
+                skipped += 1
+    if unread_only:
+        mark = load_json(READ_MARKS_PATH, {}).get(path.stem, "")
+        if mark:
+            messages = [m for m in messages
+                        if m.get("timestamp", "") > mark]
+        return messages, skipped
+    return messages[-limit:], skipped
+
+
+def format_message(msg):
+    ts = msg.get("timestamp", "")
+    try:
+        time_str = datetime.fromisoformat(ts.replace("Z", "+00:00")) \
+                           .strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        time_str = ts or "unknown"
+    sender = msg.get("sender") or msg.get("author", "?")
+    out = f"[{time_str}] {sender}: {msg.get('content', '')}"
+    for att in msg.get("attachments", []):
+        loc = att.get("path") or att.get("url", "?")
+        out += f"\n    📎 {att.get('filename', '?')}: {loc}"
+    return out
+
+
+def mark_read(channel, messages):
+    """Advance the read mark to the newest timestamp and clear the flag.
+
+    Same semantics as the engine's _mailbox_read: timestamp-based mark
+    in mailbox_read_marks.json, channel removed from unread_channels.json.
+    """
+    last_ts = ""
+    for m in reversed(messages):
+        if m.get("timestamp"):
+            last_ts = m["timestamp"]
+            break
+    if last_ts:
+        marks = load_json(READ_MARKS_PATH, {})
+        if last_ts > marks.get(channel, ""):
+            marks[channel] = last_ts
+            try:
+                READ_MARKS_PATH.write_text(json.dumps(marks, indent=2))
+            except OSError as e:
+                print(f"⚠️  Could not update read mark: {e}")
+    flags = set(load_json(UNREAD_FLAGS_PATH, []))
+    if channel in flags:
+        flags.discard(channel)
+        try:
+            UNREAD_FLAGS_PATH.write_text(json.dumps(sorted(flags)))
+        except OSError:
+            pass
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Read messages from Quiet's local Discord transcripts")
+    parser.add_argument("channel", nargs="?", help="Channel name")
+    parser.add_argument("limit", nargs="?", type=int, default=25,
+                        help="Number of messages to show (default: 25)")
+    parser.add_argument("--unread", action="store_true",
+                        help="Show only messages newer than the read mark")
+    parser.add_argument("--no-mark", action="store_true",
+                        help="Do not advance the read mark")
+    parser.add_argument("--list", action="store_true",
+                        help="List available channels")
+    args = parser.parse_args()
+
+    if args.list or not args.channel:
+        list_channels()
+        return 0
+
+    if not TRANSCRIPT_DIR.exists():
+        print(f"❌ No transcripts directory at {TRANSCRIPT_DIR}")
+        return 1
+
+    path = resolve_channel(args.channel)
+    if path is None:
+        return 1
+    channel = path.stem
+
+    try:
+        messages, skipped = read_transcript(path, args.limit, args.unread)
+    except OSError as e:
+        print(f"❌ Error reading transcript: {e}")
+        return 1
+    if skipped:
+        print(f"⚠️  Skipped {skipped} corrupted line(s)")
+
+    if not messages:
+        word = "unread messages" if args.unread else "messages"
+        print(f"📨 No {word} in #{channel}")
+        return 0
+
+    label = f"{len(messages)} unread" if args.unread else f"last {len(messages)}"
+    print(f"📨 #{channel} — {label} message(s):\n")
+    for m in messages:
+        print(format_message(m))
+
+    if not args.no_mark:
+        mark_read(channel, messages)
+        print(f"\n✓ Marked #{channel} as read")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
