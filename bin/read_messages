@@ -21,6 +21,7 @@ Usage:
     read_messages --list                # list available channels
 """
 
+import os
 import sys
 import json
 import argparse
@@ -209,4 +210,11 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except BrokenPipeError:
+        # Downstream (head, less) closed the pipe: normal, not an error.
+        # Point stdout's fd at /dev/null so the interpreter's flush-at-exit
+        # doesn't raise a second time, then leave quietly.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(0)
