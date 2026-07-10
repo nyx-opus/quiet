@@ -83,6 +83,11 @@ def execute_tool(name: str, input_data: dict) -> str:
     if name == "bash":
         try:
             home = os.path.expanduser("~")
+            # Non-login shells don't source the user's profile, so the
+            # household verbs in ~/bin (and Quiet's own in ~/quiet/bin)
+            # vanish from PATH. Prepend them explicitly.
+            env = os.environ.copy()
+            env["PATH"] = f"{home}/bin:{home}/quiet/bin:" + env.get("PATH", "")
             result = subprocess.run(
                 input_data["command"],
                 shell=True,
@@ -91,6 +96,7 @@ def execute_tool(name: str, input_data: dict) -> str:
                 timeout=120,
                 cwd=home,
                 stdin=subprocess.DEVNULL,
+                env=env,
             )
             output = result.stdout
             if result.stderr:
