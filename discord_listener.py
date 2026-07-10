@@ -996,7 +996,7 @@ class QuietDiscordBot(discord.Client):
                 else:
                     print(f"[wake] server returned {resp.status}")
         except Exception as e:
-            print(f"[wake] error: {e}")
+            print(f"[wake] error: {repr(e)}")
 
     async def send_to_quiet(self, content: str) -> str:
         """POST message to Quiet web server and return response text."""
