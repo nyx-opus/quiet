@@ -513,11 +513,20 @@ class QuietDiscordBot(discord.Client):
             # Reductions local: an override may only shrink the reach.
             after = max(after, now - timedelta(seconds=override))
 
+        # Dedup against the transcript itself, not just the in-memory
+        # seen-set (which is empty after a restart — exactly when
+        # backfill runs). Any message whose ID the transcript already
+        # holds is on disk by definition; refetching it must be a
+        # no-op, whatever the clocks said when it was first written.
+        on_disk = self._transcript_message_ids(name)
+
         count = 0
         try:
             async for msg in channel.history(after=after, limit=limit,
                                              oldest_first=True):
                 if msg.id in self._seen_message_ids:
+                    continue
+                if str(msg.id) in on_disk:
                     continue
                 await self.on_message(msg)
                 count += 1
@@ -605,7 +614,8 @@ class QuietDiscordBot(discord.Client):
             self.append_transcript(channel_name, sender, content,
                                    author_id=str(message.author.id),
                                    is_self=True,
-                                   timestamp=message.created_at)
+                                   timestamp=message.created_at,
+                                   message_id=message.id)
             return
 
         # Is this a mention of our bot?
@@ -647,7 +657,8 @@ class QuietDiscordBot(discord.Client):
                   f" → transcripted, unread flagged")
         await self.handle_ambient(sender, content, channel_name,
                                   author_id=str(message.author.id),
-                                  timestamp=message.created_at)
+                                  timestamp=message.created_at,
+                                  message_id=message.id)
 
         # Direct messages get a wake trigger — poke the engine so the
         # resident notices the mail promptly instead of waiting for
@@ -701,7 +712,8 @@ class QuietDiscordBot(discord.Client):
 
     def append_transcript(self, channel_name: str, sender: str, content: str,
                           author_id: str = None, is_self: bool = None,
-                          timestamp: datetime = None):
+                          timestamp: datetime = None,
+                          message_id=None):
         """Append message to per-channel transcript file.
 
         Identity is stamped at write time — the listener is the one
@@ -716,6 +728,12 @@ class QuietDiscordBot(discord.Client):
         rather than its recovery time. Live messages pass created_at
         too — it differs from now() by network latency only, and one
         code path beats two.
+
+        The Discord message ID is stamped when known, so backfill can
+        recognise a message the transcript already holds regardless of
+        which clock stamped the line (the 2026-07-09 duplicate: a
+        local now() write beat Discord's created_at by ~1s, and the
+        strictly-after boundary let the same message back in).
         """
         path = self.transcript_dir / f"{channel_name}.jsonl"
         if timestamp is None:
@@ -729,8 +747,34 @@ class QuietDiscordBot(discord.Client):
             entry["author_id"] = str(author_id)
         if is_self is not None:
             entry["self"] = bool(is_self)
+        if message_id is not None:
+            entry["id"] = str(message_id)
         with open(path, "a") as f:
             f.write(json.dumps(entry) + "\n")
+
+    def _transcript_message_ids(self, channel_name: str) -> set:
+        """Collect the Discord message IDs already in a transcript.
+
+        Legacy lines carry no "id" field and simply don't contribute —
+        the timestamp boundary still covers them. Damaged lines are
+        skipped, matching _last_transcript_time's tolerance.
+        """
+        path = self.transcript_dir / f"{channel_name}.jsonl"
+        ids = set()
+        if not path.exists():
+            return ids
+        try:
+            with open(path) as f:
+                for line in f:
+                    try:
+                        mid = json.loads(line).get("id")
+                        if mid:
+                            ids.add(str(mid))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            pass
+        return ids
 
     async def handle_direct(self, message, sender, content, channel_name):
         """Handle DM or mention — inject into session and respond."""
@@ -849,7 +893,8 @@ class QuietDiscordBot(discord.Client):
             print(f"  → error: {e}", file=sys.stderr)
 
     async def handle_ambient(self, sender, content, channel_name,
-                             author_id=None, timestamp=None):
+                             author_id=None, timestamp=None,
+                             message_id=None):
         """Handle channel message — transcript and mark as unread.
 
         All messages (including former "direct" ones) now route here.
@@ -866,7 +911,8 @@ class QuietDiscordBot(discord.Client):
         print(f"[ambient] #{channel_name} {sender}: {content[:80]}")
         self.append_transcript(channel_name, sender, content,
                                author_id=author_id, is_self=False,
-                               timestamp=timestamp)
+                               timestamp=timestamp,
+                               message_id=message_id)
         self.mark_unread(channel_name)
 
     def mark_unread(self, channel_name: str):
