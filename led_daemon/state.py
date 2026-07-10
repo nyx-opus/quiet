@@ -61,8 +61,14 @@ def set_state(state, dnd=None, state_file=None):
         "dnd": dnd if dnd is not None else current.get("dnd", False),
     }
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
+    # Atomic write: the daemon polls this file every 2s, so a plain
+    # open("w") risks it reading a half-written file mid-dump (flicker
+    # to "off"). Write to a temp file in the same directory, then
+    # rename — rename is atomic on POSIX filesystems.
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
         json.dump(data, f, indent=2)
+    os.replace(tmp_path, path)
     return data
 
 
