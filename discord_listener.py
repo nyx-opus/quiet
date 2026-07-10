@@ -254,6 +254,12 @@ class QuietDiscordBot(discord.Client):
             snapshot = {name: table[name]["id"] for name in table}
             (routes_path / "discovered_channels.json").write_text(
                 json.dumps(snapshot, indent=2))
+            # Room signs for standalone tools (read_messages header).
+            descriptions = {name: table[name]["description"]
+                            for name in table
+                            if table[name].get("description")}
+            (routes_path / "channel_descriptions.json").write_text(
+                json.dumps(descriptions, indent=2))
             _generate_write_map(snapshot)
         except OSError as e:
             print(f"[discovery] couldn't persist route snapshot: {e}",

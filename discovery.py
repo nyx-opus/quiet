@@ -186,7 +186,13 @@ def classify(raw_channels: list[dict], bot_id: str, log=None) -> dict:
         else:
             default_mode = "group"
 
-        policy = _parse_policy(c.get("topic") or "", c["name"], log)
+        topic = c.get("topic") or ""
+        policy = _parse_policy(topic, c["name"], log)
+        # Human-facing room sign: the topic minus the policy line.
+        # Topics may carry both, one per line; strip `quiet:` lines
+        # and whatever text remains is the description.
+        description = re.sub(
+            r"^quiet:.*$", "", topic, flags=re.MULTILINE).strip()
         route = {
             "id": str(c["id"]),
             "name": c["name"],
@@ -194,6 +200,8 @@ def classify(raw_channels: list[dict], bot_id: str, log=None) -> dict:
             "batch": 5,
             "policy_source": "shape-default",
         }
+        if description:
+            route["description"] = description
         if policy:
             route["policy_source"] = "topic"
             route.update(policy)

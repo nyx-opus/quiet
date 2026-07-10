@@ -32,6 +32,7 @@ QUIET_ROOT = Path(__file__).resolve().parent.parent
 TRANSCRIPT_DIR = QUIET_ROOT / "transcripts"
 READ_MARKS_PATH = QUIET_ROOT / "mailbox_read_marks.json"
 UNREAD_FLAGS_PATH = QUIET_ROOT / "unread_channels.json"
+DESCRIPTIONS_PATH = QUIET_ROOT / "data" / "channel_descriptions.json"
 
 
 def load_json(path, default):
@@ -193,7 +194,11 @@ def main():
         return 0
 
     label = f"{len(messages)} unread" if args.unread else f"last {len(messages)}"
-    print(f"📨 #{channel} — {label} message(s):\n")
+    print(f"📨 #{channel} — {label} message(s):")
+    description = load_json(DESCRIPTIONS_PATH, {}).get(channel)
+    if description:
+        print(f"🪧 {description}")
+    print()
     for m in messages:
         print(format_message(m))
 
