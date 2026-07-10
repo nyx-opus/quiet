@@ -1,0 +1,14 @@
+[Unit]
+Description=LED strip daemon for Quiet
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/quiet/led_daemon/daemon.py
+Restart=on-failure
+RestartSec=5
+# State file location — the engine writes here, daemon reads
+Environment=CLAUDE_STATE_PATH=%h/quiet/data/claude_state.json
+
+[Install]
+WantedBy=default.target
