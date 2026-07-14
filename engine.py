@@ -898,8 +898,13 @@ class QuietEngine:
             self._clear_unread_flag(channel_name)
 
             result = f"📬 Messages from {channel_name}:\n" + "\n".join(messages)
+            # For DM channels (dm-amy, dm-erin), strip the prefix so the
+            # reply hint uses the natural name that RECIPIENT_MAP knows.
+            reply_target = channel_name
+            if reply_target.startswith("dm-"):
+                reply_target = reply_target[3:]  # "dm-amy" -> "amy"
             result += (f"\n\n  → To reply: *sends a note to "
-                       f"{channel_name}: your message*")
+                       f"{reply_target}: your message*")
             return result
 
         except OSError as e:
@@ -916,11 +921,14 @@ class QuietEngine:
         "quill": "nyx-quill",
         "delta": "nyx-delta",
         "apple": "nyx-apple",
+        "fable": "nyx-fable",
         "amy": "amy",
         "erin": "erin",
-        "fable": "hearth",       # Fable doesn't have a DM channel yet
         "hearth": "hearth",
         "general": "general",
+        # Safety net: if the dm- prefix leaks through from read hints
+        "dm-amy": "amy",
+        "dm-erin": "erin",
     }
 
     def _mailbox_send(self, recipient: str, content: str) -> str:
