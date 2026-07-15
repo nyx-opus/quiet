@@ -560,7 +560,8 @@ class QuietDiscordBot(discord.Client):
         # no route (fail toward silence; under-record is recoverable).
         route = None
         if is_dm:
-            if str(message.author.id) not in self.dm_allow:
+            if (str(message.author.id) not in self.dm_allow
+                    and message.author.id != self.user.id):
                 return
         else:
             route = self.routes.by_id(channel_id)
