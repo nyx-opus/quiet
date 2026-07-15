@@ -69,9 +69,18 @@ MAILBOX_READ = re.compile(
 # Recipient capture is [\w-]+ (Disease B fix): \w+ stopped at hyphens,
 # so "dm-amy" captured as "dm" and "quiet-devs" as "quiet". The shim
 # aliases in the write map existed only to absorb this truncation.
+# Message capture is lazy-dot-to-line-end-asterisk (Disease C fix):
+# [^*]+ stopped at the first asterisk inside the body, so markdown
+# emphasis truncated the note silently — "I'd add that the *silent
+# skip*..." sent only "I'd add that the". The closing delimiter is now
+# an asterisk at end of line, which inline emphasis mid-sentence never
+# produces. Known residual edge: a multi-line note whose non-final line
+# ENDS with emphasis (`...*\n`) will still close early — for anything
+# that formatted, use the file route (*message <name> <path>*), which
+# is delimiter-collision-free by design.
 MAILBOX_SEND = re.compile(
-    r'^\*(?:send|write|leave|post|drop)[^*]*?\bto\s+([\w-]+)\s*[:\-–—]\s*([^*]+)\*',
-    re.IGNORECASE | re.MULTILINE
+    r'^\*(?:send|write|leave|post|drop)[^*\n]*?\bto\s+([\w-]+)\s*[:\-–—]\s*(.+?)\*[ \t]*$',
+    re.IGNORECASE | re.MULTILINE | re.DOTALL
 )
 
 # Matches file-based message actions (tier 3b: post a letter).
