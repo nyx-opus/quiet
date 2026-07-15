@@ -571,12 +571,47 @@ class QuietDiscordBot(discord.Client):
         sender = self.user_names.get(str(message.author.id),
                                       message.author.display_name)
 
+        # For DMs, name the channel after the *peer* (the other party
+        # in the conversation), not the message author.  For inbound
+        # DMs peer == author, so nothing changes.  For self-authored
+        # DMs (our own sends echoing back via the gateway), peer is
+        # the channel recipient — without this, self-sends land in
+        # "dm-{botname}" instead of "dm-{human}" (Disease E residual).
+        if is_dm:
+            if message.author.id == self.user.id:
+                # Self-authored DM: peer is the channel recipient
+                peer = getattr(message.channel, 'recipient', None)
+                if peer is not None:
+                    dm_peer_name = self.user_names.get(
+                        str(peer.id), peer.display_name).lower()
+                else:
+                    # Fallback: reverse-lookup channel_id in learned
+                    # routes — dm-amy already maps to this ID, so the
+                    # name resolves even when the gateway omits recipient.
+                    dm_peer_name = None
+                    try:
+                        learned = json.loads(
+                            _LEARNED_DM_PATH.read_text())
+                        for rname, rid in learned.items():
+                            if str(rid) == channel_id:
+                                dm_peer_name = rname.removeprefix("dm-")
+                                break
+                    except (FileNotFoundError, json.JSONDecodeError,
+                            OSError):
+                        pass
+                    if dm_peer_name is None:
+                        dm_peer_name = sender.lower()  # last resort
+            else:
+                # Inbound DM: peer is the author (existing behaviour)
+                dm_peer_name = sender.lower()
+
         # Learn the DM return address the moment consent is confirmed
         # — before any early return below (empty content, failed
         # attachment), so even a message we can't transcript still
-        # teaches us where its sender lives.
+        # teaches us where its sender lives.  Keyed on *peer* name,
+        # not author, so self-sends don't create ghost routes.
         if is_dm:
-            _learn_dm_route(f"dm-{sender.lower()}", channel_id)
+            _learn_dm_route(f"dm-{dm_peer_name}", channel_id)
 
         content = message.content
 
@@ -599,7 +634,7 @@ class QuietDiscordBot(discord.Client):
 
         # Determine channel name — server-truth from the route
         if is_dm:
-            channel_name = f"dm-{sender.lower()}"
+            channel_name = f"dm-{dm_peer_name}"
         else:
             channel_name = route["name"]
 
