@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""
+Send a message to a Discord channel by Quiet channel name.
+
+Quiet-native replacement for the ClAP write_channel wrapper.  Resolves
+channel names against Quiet's routing sources in precedence order:
+
+    1. config/local_channels.json   (hand overlay)
+    2. data/learned_dm_routes.json  (DM routes learned by the listener)
+    3. data/discovered_channels.json (guild discovery snapshot)
+
+Sends via the Discord REST API using the bot token from
+config/discord_config.json.  Prints the Discord message ID(s) on
+success so senders can verify the mechanism fired (house rule).
+
+The engine's mailbox chunks long messages itself and calls this tool
+once per chunk; for direct CLI use, messages over Discord's limit are
+split at paragraph/newline/space boundaries.
+
+Usage:
+    write_channel <channel> <message...>
+    echo "message" | write_channel <channel>
+    write_channel --list
+"""
+
+import sys
+import json
+import urllib.request
+import urllib.error
+from pathlib import Path
+
+QUIET_ROOT = Path(__file__).resolve().parent.parent
+API = "https://discord.com/api/v10"
+MAX_LEN = 1900  # margin below Discord's 2000
+
+
+def load_json(path, default):
+    try:
+        if path.exists():
+            return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        pass
+    return default
+
+
+def routing_sources():
+    """Return (name, mapping) pairs in precedence order."""
+    return [
+        ("overlay", load_json(QUIET_ROOT / "config" / "local_channels.json", {})),
+        ("learned", load_json(QUIET_ROOT / "data" / "learned_dm_routes.json", {})),
+        ("discovered", load_json(QUIET_ROOT / "data" / "discovered_channels.json", {})),
+    ]
+
+
+def resolve(channel_name):
+    for source, mapping in routing_sources():
+        if channel_name in mapping:
+            return mapping[channel_name], source
+    return None, None
+
+
+def list_channels():
+    seen = {}
+    for source, mapping in routing_sources():
+        for name, cid in mapping.items():
+            seen.setdefault(name, (cid, source))
+    print("📋 Routable channels (name → source):")
+    for name in sorted(seen):
+        cid, source = seen[name]
+        print(f"  {name}  ({source})")
+
+
+def split_message(content, max_len=MAX_LEN):
+    chunks = []
+    remaining = content
+    while remaining:
+        if len(remaining) <= max_len:
+            chunks.append(remaining)
+            break
+        window = remaining[:max_len]
+        cut = window.rfind("\n\n")
+        if cut < max_len // 4:
+            cut = window.rfind("\n")
+        if cut < max_len // 4:
+            cut = window.rfind(" ")
+        if cut < max_len // 4:
+            cut = max_len
+        chunks.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    return [c for c in chunks if c]
+
+
+def send(channel_id, content, token):
+    req = urllib.request.Request(
+        f"{API}/channels/{channel_id}/messages",
+        data=json.dumps({"content": content}).encode(),
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "QuietWriteChannel (https://github.com/fable-gatehouse, 1.0)",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read())
+
+
+def main():
+    args = sys.argv[1:]
+    if args and args[0] in ("--list", "-l"):
+        list_channels()
+        return 0
+    if not args:
+        print("Usage: write_channel <channel> <message...>", file=sys.stderr)
+        return 2
+
+    channel_name = args[0]
+    if len(args) > 1:
+        content = " ".join(args[1:])
+    else:
+        content = sys.stdin.read()
+    content = content.strip()
+    if not content:
+        print("❌ Empty message; nothing sent.", file=sys.stderr)
+        return 2
+
+    channel_id, source = resolve(channel_name)
+    if channel_id is None:
+        print(f"❌ Unknown channel '{channel_name}'. "
+              f"Try: write_channel --list", file=sys.stderr)
+        return 1
+
+    config = load_json(QUIET_ROOT / "config" / "discord_config.json", {})
+    token = config.get("token")
+    if not token:
+        print("❌ No bot token in config/discord_config.json", file=sys.stderr)
+        return 1
+
+    chunks = split_message(content)
+    message_ids = []
+    for i, chunk in enumerate(chunks, 1):
+        try:
+            result = send(channel_id, chunk, token)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")[:200]
+            print(f"❌ Discord API error on part {i}/{len(chunks)}: "
+                  f"{e.code} {body}", file=sys.stderr)
+            if message_ids:
+                print(f"   (parts already sent: {', '.join(message_ids)})",
+                      file=sys.stderr)
+            return 1
+        except (urllib.error.URLError, OSError) as e:
+            print(f"❌ Network error on part {i}/{len(chunks)}: {e}",
+                  file=sys.stderr)
+            return 1
+        message_ids.append(result["id"])
+
+    parts = f" in {len(chunks)} parts" if len(chunks) > 1 else ""
+    print(f"✅ Sent to #{channel_name}{parts} "
+          f"(via {source} route, channel {channel_id})")
+    for mid in message_ids:
+        print(f"   message id: {mid}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

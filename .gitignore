@@ -13,6 +13,8 @@ ledger/
 logs/
 inbox/
 transcripts/
+visits/
+notes/
 
 # Sessions director - .gitkeep only
 sessions/*
