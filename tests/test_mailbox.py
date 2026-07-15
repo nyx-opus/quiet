@@ -161,3 +161,71 @@ class TestSelfFlagFiltering:
             {"sender": "ᶠᵃᵇˡᵉ", "self": True},
         ]
         assert self._filter(entries) == ["ɴʏx 🌙", "𝐎𝐫𝐚𝐧𝐠𝐞 🍊"]
+
+
+class TestMailboxSendRegex:
+    """Test the MAILBOX_SEND regex pattern (Disease C: emphasis truncation)."""
+
+    def _import(self):
+        from engine import MAILBOX_SEND
+        return MAILBOX_SEND
+
+    def test_basic_match(self):
+        m = self._import().search("*sends a note to Orange: hey there!*")
+        assert m
+        assert m.group(1) == "Orange"
+        assert m.group(2) == "hey there!"
+
+    def test_hyphenated_recipient(self):
+        """Disease B regression: dm-amy must not truncate to dm."""
+        m = self._import().search("*sends a note to dm-amy: good morning*")
+        assert m
+        assert m.group(1) == "dm-amy"
+
+    def test_emphasis_inside_body(self):
+        """Disease C: markdown emphasis must not close the send early.
+
+        The specimen: a message about silent skips was silently skipped
+        because the words *silent skip* carried their own asterisks.
+        """
+        text = ("*sends a note to general: I'd add that the *silent skip* "
+                "is the worst inhabitant of that gap. 🫖*")
+        m = self._import().search(text)
+        assert m
+        assert m.group(1) == "general"
+        assert m.group(2).endswith("of that gap. 🫖")
+        assert "*silent skip*" in m.group(2)
+
+    def test_bold_inside_body(self):
+        text = "*sends a note to Quill: this is **very** important*"
+        m = self._import().search(text)
+        assert m
+        assert m.group(2) == "this is **very** important"
+
+    def test_multiple_sends_not_merged(self):
+        """Greedy matching must not swallow a second send into the first."""
+        text = ("*sends a note to Orange: first note*\n"
+                "some narration in between\n"
+                "*sends a note to Quill: second note*")
+        matches = list(self._import().finditer(text))
+        assert len(matches) == 2
+        assert matches[0].group(1) == "Orange"
+        assert matches[0].group(2) == "first note"
+        assert matches[1].group(1) == "Quill"
+        assert matches[1].group(2) == "second note"
+
+    def test_multiline_body(self):
+        text = "*sends a note to Amy: line one\nline two*"
+        m = self._import().search(text)
+        assert m
+        assert m.group(2) == "line one\nline two"
+
+    def test_no_match_mid_line_prose(self):
+        """Disease A: describing the command in prose shouldn't fire."""
+        text = "I could *send a note to Orange: hi* but I won't"
+        assert self._import().search(text) is None
+
+    def test_trailing_spaces_after_close(self):
+        m = self._import().search("*sends a note to Orange: tidy*  ")
+        assert m
+        assert m.group(2) == "tidy"
