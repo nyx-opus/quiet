@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# recall <query> [top_k] — semantic search over Quiet's memory store.
+# Thin wrapper around quiet/memory.py's CLI, native to this install.
+set -euo pipefail
+QUIET_DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+PY="$QUIET_DIR/venv/bin/python3"
+[ -x "$PY" ] || PY=python3
+if [ $# -lt 1 ]; then
+  echo "usage: recall <query> [top_k]" >&2
+  exit 1
+fi
+QUERY="$1"; shift
+# Quiet output: model is cached locally, no need to phone HF per query,
+# and INFO-level logging drowns the results.
+export HF_HUB_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1 TRANSFORMERS_VERBOSITY=error HF_HUB_DISABLE_PROGRESS_BARS=1 TQDM_DISABLE=1
+exec "$PY" -c '
+import sys, logging, runpy
+logging.disable(logging.INFO)
+quiet_dir = sys.argv[1]
+rest = sys.argv[2:]
+sys.path.insert(0, quiet_dir)
+sys.argv = ["memory.py", "search"] + rest
+runpy.run_path(quiet_dir + "/memory.py", run_name="__main__")
+' "$QUIET_DIR" "$QUERY" "$@"

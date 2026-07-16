@@ -103,6 +103,27 @@ def _extract_text(msg: dict) -> str:
     return str(content)
 
 
+_identity_cache: dict = {}
+
+
+def _identity_name(role: str) -> str:
+    """Map a message role to a speaker name for this house.
+
+    Names come from quiet_config.txt (CLAUDE_NAME / HUMAN_NAME) — never
+    hardcoded. A hardcoded name from the machine this was written on
+    mislabels every memory in everyone else's house. Falls back to the
+    raw role string if config is unavailable.
+    """
+    if not _identity_cache:
+        try:
+            from config_reader import get as _cfg_get
+            _identity_cache["user"] = (_cfg_get("HUMAN_NAME") or "").strip()
+            _identity_cache["assistant"] = (_cfg_get("CLAUDE_NAME") or "").strip()
+        except Exception:
+            pass
+    return _identity_cache.get(role) or role
+
+
 def _chunk_messages(messages: list[dict]) -> list[dict]:
     """Convert message dicts into chunk dicts ready for embedding.
 
@@ -128,7 +149,9 @@ def _chunk_messages(messages: list[dict]) -> list[dict]:
             next_msg = messages[i + 1]
             next_text = _extract_text(next_msg)
             if next_text.strip():
-                combined = f"[Amy]: {text}\n\n[Nyx]: {next_text}"
+                human = msg.get("name") or _identity_name("user")
+                claude = next_msg.get("name") or _identity_name("assistant")
+                combined = f"[{human}]: {text}\n\n[{claude}]: {next_text}"
                 chunks.append({
                     "speaker": "exchange",
                     "timestamp": ts or msg.get("created_at", ""),
@@ -138,7 +161,7 @@ def _chunk_messages(messages: list[dict]) -> list[dict]:
                 continue
 
         # Solo message
-        speaker = "Amy" if role == "user" else "Nyx" if role == "assistant" else role
+        speaker = msg.get("name") or _identity_name(role)
         chunks.append({
             "speaker": speaker,
             "timestamp": ts or msg.get("created_at", ""),
