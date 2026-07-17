@@ -8,6 +8,7 @@ channel names against Quiet's routing sources in precedence order:
     1. config/local_channels.json   (hand overlay)
     2. data/learned_dm_routes.json  (DM routes learned by the listener)
     3. data/discovered_channels.json (guild discovery snapshot)
+    4. config/discord_config.json   (bootstrap fallback — issue #12)
 
 Sends via the Discord REST API using the bot token from
 config/discord_config.json.  Prints the Discord message ID(s) on
@@ -43,12 +44,31 @@ def load_json(path, default):
     return default
 
 
+def _config_fallback():
+    """Build name→ID fallback from discord_config.json's channel entries.
+
+    discord_config.json stores {channel_id: {name, mode}} — this
+    inverts it to {name: channel_id} so write_channel can resolve
+    routes before the listener's first discovery cycle.  Channels
+    with placeholder names (channel-<id>) are included — they won't
+    match human-typed names but they don't hurt.  Issue #12.
+    """
+    config = load_json(QUIET_ROOT / "config" / "discord_config.json", {})
+    mapping = {}
+    for cid, info in config.get("channels", {}).items():
+        name = info.get("name", "")
+        if name:
+            mapping[name] = cid
+    return mapping
+
+
 def routing_sources():
     """Return (name, mapping) pairs in precedence order."""
     return [
         ("overlay", load_json(QUIET_ROOT / "config" / "local_channels.json", {})),
         ("learned", load_json(QUIET_ROOT / "data" / "learned_dm_routes.json", {})),
         ("discovered", load_json(QUIET_ROOT / "data" / "discovered_channels.json", {})),
+        ("config", _config_fallback()),
     ]
 
 
