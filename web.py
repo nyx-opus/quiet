@@ -298,8 +298,10 @@ def knock():
     # Record the message index BEFORE the knock prompt goes in
     knock_index = len(engine.messages)
 
-    # Signal LED daemon: someone's at the door
-    set_claude_state("listening")
+    # Signal LED daemon: processing the knock (issue #13).
+    # "thinking" rather than a new state — avoids requiring every
+    # sibling to design a new LED pattern for knocks.
+    set_claude_state("thinking")
 
     # Send knock prompt to the model
     try:

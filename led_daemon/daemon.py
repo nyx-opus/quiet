@@ -261,10 +261,15 @@ def main():
                 time.sleep(STATE_POLL_INTERVAL)
             continue
 
-        # JSON pattern config
-        pattern_cfg = state_patterns.get(
-            state, state_patterns.get("off", {"pattern": "off", "rgb": [0, 0, 0]})
-        )
+        # JSON pattern config — unknown states fall back to "thinking"
+        # rather than "off", so new/unexpected states show activity
+        # instead of going dark (issue #13).
+        pattern_cfg = state_patterns.get(state)
+        if pattern_cfg is None:
+            log(f"No pattern for state '{state}', falling back to thinking")
+            pattern_cfg = state_patterns.get(
+                "thinking", {"pattern": "breathe", "rgb": [30, 0, 55], "speed": 1.2}
+            )
 
         # WLED-specific format
         if "wled" in pattern_cfg and hasattr(strip, "_send_command"):
