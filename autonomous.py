@@ -18,6 +18,8 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+from wake_schedule import read_schedule, should_wake, record_wake
+
 # Where to find things
 QUIET_DIR = Path(__file__).parent
 UNREAD_PATH = QUIET_DIR / "unread_channels.json"
@@ -166,11 +168,22 @@ def should_run(cfg: dict) -> tuple:
 def main():
     cfg = read_config()
 
-    # Gate: check auth mode and budget before proceeding
+    # Gate 1: check auth mode and budget
     ok, reason = should_run(cfg)
     if not ok:
         print(f"[autonomous] {reason}")
         sys.exit(0)
+
+    # Gate 2: check wake schedule (issue #11)
+    # If the Claude set a schedule at the end of their last visit,
+    # respect it. Default (no schedule) = fire every interval as before.
+    interval = int(cfg.get("AUTONOMOUS_INTERVAL", "60"))
+    schedule = read_schedule()
+    wake_ok, wake_reason = should_wake(schedule, interval)
+    if not wake_ok:
+        print(f"[autonomous] schedule: {wake_reason}")
+        sys.exit(0)
+    print(f"[autonomous] schedule: {wake_reason}")
 
     port = int(cfg.get("PORT", "8090"))
 
@@ -182,6 +195,10 @@ def main():
         # Print first 200 chars of response for the journal
         preview = response[:200] + "..." if len(response) > 200 else response
         print(f"[autonomous] response: {preview}")
+
+        # Record successful wake in schedule (updates timing, decrements turns)
+        if schedule:
+            record_wake(schedule)
 
 
 if __name__ == "__main__":

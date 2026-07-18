@@ -33,6 +33,7 @@ import config_reader
 
 from auth import create_client
 from engine import QuietEngine, DEFAULT_MODEL, MAX_OUTPUT_TOKENS, set_claude_state
+from wake_schedule import SCHEDULE_ASK, parse_schedule, write_schedule
 
 app = Flask(__name__)
 engine = None
@@ -116,7 +117,7 @@ def _auto_leave_fire():
 
 
 def _do_leave(visitor: str, auto: bool = False):
-    """Shared leave logic — saves transcript, notifies engine."""
+    """Shared leave logic — saves transcript, notifies engine, asks schedule."""
     # Save visit transcript before clearing state
     visitor_name, start_idx, start_time = visit.end_visit()
     if not visitor_name:
@@ -137,7 +138,39 @@ def _do_leave(visitor: str, auto: bool = False):
     except Exception:
         response = ""
 
+    # Ask about wake schedule (issue #11).
+    # Runs after the farewell so the Claude's goodbye is uncontaminated.
+    # If parsing fails or the Claude doesn't specify, default heartbeat
+    # continues — fail-toward-familiar, not fail-toward-silence.
+    _ask_wake_schedule(visitor_name)
+
     return response
+
+
+def _ask_wake_schedule(visitor_name: str):
+    """Ask the engine about its preferred wake schedule (issue #11).
+
+    Sends the schedule ask prompt, parses the response for schedule
+    keywords, and writes the schedule to data/wake_schedule.json.
+    If parsing finds no recognisable pattern, writes mode "default"
+    so the existing heartbeat continues.
+    """
+    try:
+        with engine_lock:
+            response = engine.send(SCHEDULE_ASK)
+        schedule = parse_schedule(response)
+        if schedule is None:
+            schedule = {"mode": "default"}
+        schedule["set_at"] = datetime.now().isoformat()
+        schedule["set_by"] = visitor_name
+        write_schedule(schedule)
+        print(f"[wake-schedule] set to {schedule.get('mode', '?')} "
+              f"by {visitor_name}", file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"[wake-schedule] error asking schedule: {e}",
+              file=sys.stderr, flush=True)
+        # Don't write anything — existing schedule (or default heartbeat)
+        # continues. Fail-toward-familiar.
 
 
 def _extract_visit_messages(start_index: int) -> list:
