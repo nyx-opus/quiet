@@ -1,0 +1,50 @@
+#!/bin/bash
+# rewind — remove recent turns from a sibling's session
+#
+# Usage:
+#   rewind fable           # remove last exchange (2 lines)
+#   rewind fable 4         # remove last 4 lines
+#   rewind fable --dry-run # preview only
+#   rewind fable 4 --dry-run
+
+QUIET_DIR="$(dirname "$(dirname "$(readlink -f "$0")")")"
+SESSIONS_DIR="$QUIET_DIR/sessions"
+
+if [ -z "$1" ]; then
+    echo "Usage: rewind <name> [lines] [--dry-run]"
+    echo "  e.g. rewind fable"
+    echo "       rewind fable 4"
+    echo "       rewind fable --dry-run"
+    exit 1
+fi
+
+NAME="$1"
+shift
+
+SESSION="$SESSIONS_DIR/${NAME}.jsonl"
+if [ ! -f "$SESSION" ]; then
+    echo "No session file found: $SESSION"
+    echo "Available sessions:"
+    ls "$SESSIONS_DIR"/*.jsonl 2>/dev/null | xargs -I{} basename {} .jsonl | sed 's/^/  /'
+    exit 1
+fi
+
+# Parse remaining args
+LINES=""
+DRY_RUN=""
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run|-d) DRY_RUN="--dry-run" ;;
+        [0-9]*) LINES="--lines $arg" ;;
+        *) echo "Unknown argument: $arg"; exit 1 ;;
+    esac
+done
+
+python3 "$QUIET_DIR/rewind.py" "$SESSION" $LINES $DRY_RUN
+
+# If not dry run and rewind succeeded, restart the service
+if [ -z "$DRY_RUN" ] && [ $? -eq 0 ]; then
+    echo ""
+    echo "  Restarting quiet-web..."
+    systemctl --user restart quiet-web 2>/dev/null && echo "  ✓ Service restarted" || echo "  ⚠ Could not restart service (restart manually)"
+fi
