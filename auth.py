@@ -22,6 +22,14 @@ from anthropic.lib.credentials._types import AccessToken
 CREDENTIALS_PATH = Path.home() / ".config" / "Claude" / ".credentials.json"
 # From Claude Code's OAuth PKCE login flow (visible in Chromium process args during auth)
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+
+# Exact first system block required for OAuth subscription traffic.
+# Source: connectome-host anthropic adapter (anima-research), verified 2026-07-09.
+# Without this as the first system block, the API returns a masked
+# 429 rate_limit_error on subscription tokens.
+OAUTH_SYSTEM_IDENTITY = (
+    "You are Claude Code, Anthropic's official CLI for Claude."
+)
 TOKEN_ENDPOINT = "https://api.anthropic.com/v1/oauth/token"
 OAUTH_BETA_HEADER = "oauth-2025-04-20"
 REFRESH_MARGIN_SECONDS = 300

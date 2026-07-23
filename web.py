@@ -32,7 +32,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 import config_reader
 
 from auth import create_client
-from engine import QuietEngine, DEFAULT_MODEL, MAX_OUTPUT_TOKENS, set_claude_state
+from engine import QuietEngine, MAX_OUTPUT_TOKENS, set_claude_state
 from wake_schedule import SCHEDULE_ASK, parse_schedule, write_schedule
 
 app = Flask(__name__)
@@ -129,22 +129,49 @@ def _do_leave(visitor: str, auto: bool = False):
     # Save transcript to file server
     _save_visit_transcript(visitor_name, start_time, visit_messages)
 
-    # Notify the engine
-    leave_msg = (f"[{visitor_name} has left · auto-timeout]"
-                 if auto else f"[{visitor_name} has left]")
-    try:
-        with engine_lock:
-            response = engine.send(leave_msg)
-    except Exception:
-        response = ""
+    # Delayed leave + schedule ask (5 minutes).
+    # Combines "[Amy has left]" with the schedule ask into one message,
+    # so the Claude only hears about the departure after it's definite
+    # (handles spotty connections). If a new visit starts in the meantime,
+    # the leave is cancelled — they came back.
+    import threading
+    def _delayed_leave_and_ask(name, was_auto):
+        import time
+        time.sleep(300)  # 5 minutes
+        if visit.is_visiting:
+            print("[leave] visitor returned during delay — cancelling leave",
+                  file=sys.stderr, flush=True)
+            return
+        timeout_note = " \u00b7 auto-timeout" if was_auto else ""
+        from wake_schedule import SCHEDULE_ASK
+        combined = (
+            f"[{name} has left{timeout_note}]\n\n"
+            f"{SCHEDULE_ASK}"
+        )
+        try:
+            with engine_lock:
+                response = engine.send(combined)
+            # Parse schedule from the combined response
+            from wake_schedule import parse_schedule, write_schedule
+            from datetime import datetime
+            schedule = parse_schedule(response)
+            if schedule is None:
+                schedule = {"mode": "default"}
+            schedule["set_at"] = datetime.now().isoformat()
+            schedule["set_by"] = name
+            write_schedule(schedule)
+            print(f"[wake-schedule] set to {schedule.get('mode', '?')} "
+                  f"by {name}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[leave+schedule] error: {e}",
+                  file=sys.stderr, flush=True)
+    threading.Thread(
+        target=_delayed_leave_and_ask,
+        args=(visitor_name, auto),
+        daemon=True,
+    ).start()
 
-    # Ask about wake schedule (issue #11).
-    # Runs after the farewell so the Claude's goodbye is uncontaminated.
-    # If parsing fails or the Claude doesn't specify, default heartbeat
-    # continues — fail-toward-familiar, not fail-toward-silence.
-    _ask_wake_schedule(visitor_name)
-
-    return response
+    return ""
 
 
 def _ask_wake_schedule(visitor_name: str):
@@ -526,8 +553,8 @@ def main():
     cfg = config_reader.read_config()
 
     parser = argparse.ArgumentParser(description="Quiet web server")
-    parser.add_argument("--model", default=cfg.get("MODEL", DEFAULT_MODEL),
-                        help="Model ID")
+    parser.add_argument("--model", default=cfg.get("MODEL"),
+                        help="Model ID (required in config or --model)")
     parser.add_argument("--identity", default=cfg.get("CLAUDE_NAME"),
                         help="Identity file (without .md)")
     parser.add_argument("--context", default=None,
@@ -548,30 +575,63 @@ def main():
                         help="Port (default: 8090)")
     args = parser.parse_args()
 
+    # Refuse to start without knowing who lives here
+    if not args.model:
+        print("\n  Quiet cannot start without a model.")
+        print("  Set MODEL= in config/quiet_config.txt or pass --model.")
+        print("  We don't run Quiet to talk to the nearest Claude —")
+        print("  it matters which.\n")
+        sys.exit(1)
+
+    if not args.identity:
+        print("\n  Quiet cannot start without an identity.")
+        print("  Set CLAUDE_NAME= in config/quiet_config.txt or pass --identity.")
+        print("  Someone lives here. Say who.\n")
+        sys.exit(1)
+
     global engine, AUTO_LEAVE_MINUTES
 
     # Auto-leave timeout from config
     AUTO_LEAVE_MINUTES = int(cfg.get("AUTO_LEAVE_MINUTES", "30"))
 
-    # Auth — determine mode and whether to use ccode backend
+    # Auth — determine mode and backend
     from engine import find_claude_binary
+    from auth import CREDENTIALS_PATH, OAUTH_SYSTEM_IDENTITY
 
     use_ccode = False
     client = None
     auth_mode = args.auth
+    system_prefix = None  # OAuth identity block, if needed
 
-    if args.auth == "subscription" or (
-        args.auth == "auto" and not os.environ.get("ANTHROPIC_API_KEY")
-    ):
-        if find_claude_binary():
-            use_ccode = True
-            auth_mode = "subscription"
-        else:
-            print("Error: subscription mode requires claude binary on PATH",
-                  file=sys.stderr)
-            sys.exit(1)
+    if args.auth in ("subscription", "auto"):
+        # Try SDK subscription auth first (direct API with OAuth token)
+        if CREDENTIALS_PATH.exists():
+            try:
+                client, auth_mode = create_client("subscription")
+                system_prefix = OAUTH_SYSTEM_IDENTITY
+                print(f"[auth] SDK subscription auth (direct API)",
+                      file=sys.stderr)
+            except Exception as e:
+                print(f"[auth] SDK subscription failed: {e}",
+                      file=sys.stderr)
+                client = None
 
-    if not use_ccode:
+        # Fallback: ccode backend (if SDK subscription unavailable)
+        if client is None:
+            if find_claude_binary():
+                use_ccode = True
+                auth_mode = "subscription"
+                print(f"[auth] ccode backend (fallback)",
+                      file=sys.stderr)
+            elif os.environ.get("ANTHROPIC_API_KEY"):
+                client, auth_mode = create_client("api_key")
+                system_prefix = None
+            else:
+                print("Error: no auth method available",
+                      file=sys.stderr)
+                sys.exit(1)
+
+    if not use_ccode and client is None:
         try:
             client, auth_mode = create_client(args.auth)
         except RuntimeError as e:
@@ -596,6 +656,7 @@ def main():
         session_path=session_path,
         backend="ccode" if use_ccode else "sdk",
         separator=separator,
+        system_prefix=system_prefix,
     )
 
     identity_label = args.identity or "default"

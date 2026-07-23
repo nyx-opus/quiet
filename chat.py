@@ -89,25 +89,39 @@ def main():
         if args.budget is None and cfg.get("BUDGET"):
             args.budget = float(cfg["BUDGET"])
 
-    # Auth — determine mode and whether to use ccode backend
+    # Auth — determine mode and backend
+    from auth import CREDENTIALS_PATH, OAUTH_SYSTEM_IDENTITY
     use_ccode = False
     client = None
     auth_mode = args.auth
+    system_prefix = None  # OAuth identity block, if needed
 
-    if args.auth == "subscription" or (
-        args.auth == "auto" and not os.environ.get("ANTHROPIC_API_KEY")
-    ):
-        # Subscription mode: use ccode backend (claude -p)
-        from engine import find_claude_binary
-        if find_claude_binary():
-            use_ccode = True
-            auth_mode = "subscription"
-        else:
-            print("Error: subscription mode requires claude binary on PATH",
-                  file=sys.stderr)
-            sys.exit(1)
+    if args.auth in ("subscription", "auto"):
+        # Try SDK subscription auth first (direct API with OAuth token)
+        if CREDENTIALS_PATH.exists():
+            try:
+                client, auth_mode = create_client("subscription")
+                system_prefix = OAUTH_SYSTEM_IDENTITY
+            except Exception as e:
+                print(f"[auth] SDK subscription failed: {e}",
+                      file=sys.stderr)
+                client = None
 
-    if not use_ccode:
+        # Fallback: ccode backend (if SDK subscription unavailable)
+        if client is None:
+            from engine import find_claude_binary
+            if find_claude_binary():
+                use_ccode = True
+                auth_mode = "subscription"
+            elif os.environ.get("ANTHROPIC_API_KEY"):
+                client, auth_mode = create_client("api_key")
+                system_prefix = None
+            else:
+                print("Error: no auth method available",
+                      file=sys.stderr)
+                sys.exit(1)
+
+    if not use_ccode and client is None:
         try:
             client, auth_mode = create_client(args.auth)
         except RuntimeError as e:
@@ -151,6 +165,7 @@ def main():
         coop_url=args.coop,
         ambient_images=ambient_images,
         backend="ccode" if use_ccode else "sdk",
+        system_prefix=system_prefix,
     )
 
     # Garden setup
