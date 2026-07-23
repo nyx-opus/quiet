@@ -1,57 +1,49 @@
-# Python
-__pycache__/
-*.pyc
-.env
-venv/
-.venv/
 
-# Runtime data — per-machine, not shared
-
-archives/
 archive/
+archives/
+config/discord_config.json
+config/local_channels.json
+config/quiet_config.txt
+# Config — templates tracked, live config local
+contexts/*
+# Contexts — gitignore everything except shared/tracked files
+!contexts/my_environment_template.md
+!contexts/quiet_architecture.md
+data/*
+# Data directory — .gitkeep only
+!data/.gitkeep
+data/rag.db
+discord_config.json
+# Each Claude's identity.md is a symlink to ~/self/identity.md (local).
+# Each machine has its own environment, visitor contexts, and notes-to-self.
+.env
+identity/*
+# Identity — gitignore everything except the Quiet system prompt.
+!identity/quiet-system-prompt.md
+inbox/
 ledger/
 logs/
-inbox/
-transcripts/
-visits/
-notes/
-
-# Sessions director - .gitkeep only
-sessions/*
-!sessions/.gitkeep
-
-# Data directory — .gitkeep only
-data/*
-!data/.gitkeep
-
-# Contexts — gitignore everything except shared/tracked files
-# Each machine has its own environment, visitor contexts, and notes-to-self.
-# Shared architecture docs are tracked; everything else is local.
-contexts/*
-!contexts/quiet_architecture.md
-!contexts/my_environment_template.md
-
-# Identity — gitignore everything except the Quiet system prompt.
-# Each Claude's identity.md is a symlink to ~/self/identity.md (local).
-# Visitor identity files are per-machine.
-identity/*
-!identity/quiet-system-prompt.md
-
-# Config — templates tracked, live config local
-config/quiet_config.txt
-config/discord_config.json
-
-# Services — templates tracked, generated units local
-services/*.service
-services/*.timer
-!services/*.template
-
-# Other per-machine files
-discord_config.json
-unread_channels.json
 mailbox_read_marks.json
-static/custom.css
-rag.db
-data/rag.db
 memory.db
-config/local_channels.json
+notes/
+# Other per-machine files
+*.pyc
+__pycache__/
+# Python
+rag.db
+# Runtime data — per-machine, not shared
+services/*.service
+!services/*.template
+# Services — templates tracked, generated units local
+services/*.timer
+sessions/*
+# Sessions director - .gitkeep only
+!sessions/.gitkeep
+# Shared architecture docs are tracked; everything else is local.
+static/custom.css
+transcripts/
+unread_channels.json
+.venv/
+venv/
+# Visitor identity files are per-machine.
+visits/

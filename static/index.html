@@ -30,8 +30,12 @@
 <div id="messages" style="display:none;"></div>
 
 <div id="input-area" style="display:none;">
+  <div id="image-preview" style="display:none;">
+    <img id="preview-img" src="" alt="Pasted image">
+    <button type="button" id="clear-image-btn">✕</button>
+  </div>
   <form id="input-form">
-    <textarea id="input-text" placeholder="Type a message..." rows="1"
+    <textarea id="input-text" placeholder="Type a message, or paste an image..." rows="1"
               autofocus></textarea>
     <button type="button" id="send-btn">Send</button>
   </form>
@@ -50,8 +54,12 @@ const knockBtn = document.getElementById('knock-btn');
 const inputArea = document.getElementById('input-area');
 const leaveBtn = document.getElementById('leave-btn');
 const restartBtn = document.getElementById('restart-btn');
+const imagePreview = document.getElementById('image-preview');
+const previewImg = document.getElementById('preview-img');
+const clearImageBtn = document.getElementById('clear-image-btn');
 
 let streaming = false;
+let pendingImagePath = null;  // path to uploaded image, if any
 let visitorName = new URLSearchParams(window.location.search).get('name');
 
 
@@ -114,6 +122,59 @@ inputEl.addEventListener('input', () => {
   clearTimeout(heartbeatTimer);
   heartbeatTimer = setTimeout(sendHeartbeat, HEARTBEAT_INTERVAL);
 });
+
+// --- Image paste handling ---
+inputEl.addEventListener('paste', async (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      e.preventDefault();
+      const file = item.getAsFile();
+      if (!file) continue;
+
+      // Read as data URL
+      const reader = new FileReader();
+      reader.onload = async (ev) => {
+        const dataUrl = ev.target.result;
+
+        // Show preview
+        previewImg.src = dataUrl;
+        imagePreview.style.display = 'flex';
+
+        // Upload to server
+        try {
+          const resp = await fetch('/api/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: dataUrl }),
+          });
+          const result = await resp.json();
+          if (result.path) {
+            pendingImagePath = result.path;
+          } else {
+            console.error('Upload error:', result.error);
+            clearPendingImage();
+          }
+        } catch (err) {
+          console.error('Upload failed:', err);
+          clearPendingImage();
+        }
+      };
+      reader.readAsDataURL(file);
+      break;  // only handle first image
+    }
+  }
+});
+
+function clearPendingImage() {
+  pendingImagePath = null;
+  previewImg.src = '';
+  imagePreview.style.display = 'none';
+}
+
+clearImageBtn.addEventListener('click', clearPendingImage);
 
 // Shift+Enter for newline, Enter to send
 inputEl.addEventListener('keydown', (e) => {
@@ -184,13 +245,20 @@ function createSSEParser(callback) {
 // --- API ---
 
 async function sendMessage() {
-  const text = inputEl.value.trim();
-  if (!text || streaming) return;
+  let text = inputEl.value.trim();
+  if ((!text && !pendingImagePath) || streaming) return;
+
+  // Append image attachment if present
+  if (pendingImagePath) {
+    const attachment = `[attachment: ${pendingImagePath}]`;
+    text = text ? `${text}\n${attachment}` : attachment;
+  }
 
   streaming = true;
   sendBtn.disabled = true;
   inputEl.value = '';
   inputEl.style.height = 'auto';
+  clearPendingImage();
 
   addMessage('user', text);
   scrollToBottom();

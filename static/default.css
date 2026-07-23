@@ -222,3 +222,37 @@ body {
   background: var(--border);
   border-radius: 3px;
 }
+
+/* Image preview */
+#image-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+#preview-img {
+  max-height: 80px;
+  max-width: 120px;
+  border-radius: 4px;
+  object-fit: contain;
+}
+
+#clear-image-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 1.2em;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+#clear-image-btn:hover {
+  color: var(--text);
+  background: var(--border);
+}

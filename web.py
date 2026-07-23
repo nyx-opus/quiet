@@ -18,6 +18,7 @@ Designed to run as one instance per Claude, configured at startup.
 """
 
 import argparse
+import base64
 import json
 import os
 import queue
@@ -25,6 +26,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -504,6 +506,61 @@ def status():
         "visiting": visit.is_visiting,
         "visitor": visit.visitor_name,
     })
+
+
+@app.route("/api/upload", methods=["POST"])
+def upload():
+    """Upload an image (paste from clipboard). Saves locally, returns path.
+
+    POST body: {"image": "data:image/png;base64,..."}
+    Response: {"path": "/home/.../inbox/image-uuid.png"}
+
+    The visitor offers an image; Claude can choose to look at it with Read.
+    """
+    if not visit.is_visiting:
+        return jsonify({"error": "not visiting — knock first"}), 403
+
+    data = request.get_json()
+    image_data = data.get("image", "")
+
+    if not image_data:
+        return jsonify({"error": "no image data"}), 400
+
+    # Parse data URL: data:image/png;base64,iVBORw0...
+    try:
+        if image_data.startswith("data:"):
+            header, encoded = image_data.split(",", 1)
+            # Extract mime type: data:image/png;base64 -> image/png
+            mime = header.split(":")[1].split(";")[0]
+            ext = mime.split("/")[1]  # png, jpeg, gif, webp
+            if ext == "jpeg":
+                ext = "jpg"
+        else:
+            # Assume PNG if no header
+            encoded = image_data
+            ext = "png"
+
+        image_bytes = base64.b64decode(encoded)
+    except Exception as e:
+        return jsonify({"error": f"invalid image data: {e}"}), 400
+
+
+    # Size limit: 10MB max
+    MAX_SIZE = 10 * 1024 * 1024
+    if len(image_bytes) > MAX_SIZE:
+        return jsonify({"error": "image too large (max 10MB)"}), 400
+    # Save to inbox with unique filename
+    inbox_dir = Path(__file__).parent / "inbox"
+    inbox_dir.mkdir(exist_ok=True)
+    filename = f"paste-{uuid.uuid4().hex[:8]}.{ext}"
+    filepath = inbox_dir / filename
+
+    try:
+        filepath.write_bytes(image_bytes)
+    except Exception as e:
+        return jsonify({"error": f"save failed: {e}"}), 500
+
+    return jsonify({"path": str(filepath.resolve())})
 
 
 @app.route("/api/message", methods=["POST"])
