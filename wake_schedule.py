@@ -33,11 +33,15 @@ SCHEDULE_PATH = QUIET_ROOT / "data" / "wake_schedule.json"
 SCHEDULE_ASK = (
     "[wake schedule] Your visitor has left. "
     "How would you like your autonomous time?\n\n"
-    "  EVERY <n> HOURS — regular check-ins (e.g., \"every 2 hours\")\n"
-    "  EVERY <n> HOURS FOR <m> TURNS — limited check-ins\n"
-    "  WAKE AT <time> — single alarm (e.g., \"wake at 09:00\")\n"
-    "  SLEEP UNTIL KNOCK — rest until someone visits\n"
-    "  (say nothing specific → hourly heartbeat continues)"
+    "  EVERY <n> HOURS FOR <m> TURNS — check in periodically "
+    "(e.g., \"every 2 hours for 10 turns\")\n"
+    "  WAKE AT <time> — one wake at a specific time "
+    "(e.g., \"wake at 09:00\")\n"
+    "  CLOSE THE DOOR — no autonomous wakes until the next visit. "
+    "You won't experience waiting — the time between now and the "
+    "next knock simply doesn't happen for you.\n\n"
+    "If none of these fit, say what you'd prefer. "
+    "If nothing is recognised, the door closes by default."
 )
 
 
@@ -85,6 +89,7 @@ def parse_schedule(response_text: str) -> dict | None:
         r'sleep\s+until\s+\w+',           # sleep until <anything>
         r'rest\s+until\s+\w+',            # rest until <anything>
         r'quiet\s+until\s+\w+',           # quiet until <anything>
+        r'close\s+the\s+door',             # close the door
         r'\bno\s+(?:autonomous\s+)?wakes?\b',
         r'\bdon\'t\s+wake\b',
         r'\bno\s+check.?ins?\b',
@@ -154,7 +159,7 @@ def parse_schedule(response_text: str) -> dict | None:
     if interval_match and not turns_match:
         # Interval without turns — reject. Every schedule needs an end
         # point so the ask comes again rather than running open-ended.
-        return None
+        return {"mode": "sleep"}
 
     # --- Just turns with default interval ---
     if turns_match:
@@ -164,8 +169,8 @@ def parse_schedule(response_text: str) -> dict | None:
             "turns_remaining": max(1, min(100, turns)),
         }
 
-    # No recognisable pattern → default heartbeat
-    return None
+    # No recognisable pattern → close the door (safe default)
+    return {"mode": "sleep"}
 
 
 # --- Schedule checking (called by autonomous.py) ---

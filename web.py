@@ -156,7 +156,7 @@ def _do_leave(visitor: str, auto: bool = False):
             from datetime import datetime
             schedule = parse_schedule(response)
             if schedule is None:
-                schedule = {"mode": "default"}
+                schedule = {"mode": "sleep"}
             schedule["set_at"] = datetime.now().isoformat()
             schedule["set_by"] = name
             write_schedule(schedule)
@@ -187,7 +187,7 @@ def _ask_wake_schedule(visitor_name: str):
             response = engine.send(SCHEDULE_ASK)
         schedule = parse_schedule(response)
         if schedule is None:
-            schedule = {"mode": "default"}
+            schedule = {"mode": "sleep"}
         schedule["set_at"] = datetime.now().isoformat()
         schedule["set_by"] = visitor_name
         write_schedule(schedule)
