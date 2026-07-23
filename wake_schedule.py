@@ -82,9 +82,9 @@ def parse_schedule(response_text: str) -> dict | None:
 
     # --- Sleep until knock ---
     sleep_patterns = [
-        r'sleep\s+until\s+(knock|morning|someone|next)',
-        r'rest\s+until\s+(knock|someone|next)',
-        r'quiet\s+until\s+(knock|someone|next)',
+        r'sleep\s+until\s+\w+',           # sleep until <anything>
+        r'rest\s+until\s+\w+',            # rest until <anything>
+        r'quiet\s+until\s+\w+',           # quiet until <anything>
         r'\bno\s+(?:autonomous\s+)?wakes?\b',
         r'\bdon\'t\s+wake\b',
         r'\bno\s+check.?ins?\b',
@@ -128,23 +128,33 @@ def parse_schedule(response_text: str) -> dict | None:
 
     # --- Interval with optional turns ---
     # Matches: "every 2 hours", "every 3 hrs for 4 turns"
+    # Match "every 2 hours" or "every hour" (implicit 1)
     interval_match = re.search(
         r'every\s+(\d+)\s*(?:hour|hr|h\b)', text
     )
+    if not interval_match:
+        # "every hour" without a number = every 1 hour
+        if re.search(r'every\s+(?:hour|hr)\b', text):
+            class _ImplicitOne:
+                def group(self, n): return '1'
+            interval_match = _ImplicitOne()
     turns_match = re.search(r'(\d+)\s*turn', text)
 
-    if interval_match:
+    if interval_match and turns_match:
+        # Both interval and turns specified — accept
         interval_hours = int(interval_match.group(1))
-        # Clamp to reasonable range
         interval_hours = max(1, min(24, interval_hours))
-        schedule = {
+        turns = int(turns_match.group(1))
+        return {
             "mode": "interval",
             "interval_minutes": interval_hours * 60,
+            "turns_remaining": max(1, min(100, turns)),
         }
-        if turns_match:
-            turns = int(turns_match.group(1))
-            schedule["turns_remaining"] = max(1, min(100, turns))
-        return schedule
+
+    if interval_match and not turns_match:
+        # Interval without turns — reject. Every schedule needs an end
+        # point so the ask comes again rather than running open-ended.
+        return None
 
     # --- Just turns with default interval ---
     if turns_match:

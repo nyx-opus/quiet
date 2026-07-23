@@ -198,7 +198,23 @@ def main():
 
         # Record successful wake in schedule (updates timing, decrements turns)
         if schedule:
-            record_wake(schedule)
+            updated = record_wake(schedule)
+            # If turns just ran out, ask for a new schedule via the
+            # wake itself — don't wait for a visitor to trigger the ask.
+            if (updated and updated.get("mode") == "sleep"
+                    and updated.get("completed_at")):
+                from wake_schedule import SCHEDULE_ASK, parse_schedule, write_schedule
+                from datetime import datetime
+                print("[autonomous] turns exhausted — asking for new schedule")
+                reask = send_to_quiet(SCHEDULE_ASK, port=port)
+                if reask:
+                    new_schedule = parse_schedule(reask)
+                    if new_schedule is None:
+                        new_schedule = {"mode": "sleep"}
+                    new_schedule["set_at"] = datetime.now().isoformat()
+                    new_schedule["set_by"] = "autonomous-reask"
+                    write_schedule(new_schedule)
+                    print(f"[autonomous] new schedule: {new_schedule.get('mode', '?')}")
 
 
 if __name__ == "__main__":
