@@ -160,7 +160,7 @@ def _do_leave(visitor: str, auto: bool = False):
             if schedule is None:
                 schedule = {"mode": "sleep"}
             schedule["set_at"] = datetime.now().isoformat()
-            schedule["set_by"] = name
+            schedule["set_by"] = "resident"  # The Claude chose this, not the visitor
             write_schedule(schedule)
             print(f"[wake-schedule] set to {schedule.get('mode', '?')} "
                   f"by {name}", file=sys.stderr, flush=True)
@@ -177,7 +177,7 @@ def _do_leave(visitor: str, auto: bool = False):
 
 
 def _ask_wake_schedule(visitor_name: str):
-    """Ask the engine about its preferred wake schedule (issue #11).
+    """Ask the resident Claude about their preferred wake schedule (issue #11).
 
     Sends the schedule ask prompt, parses the response for schedule
     keywords, and writes the schedule to data/wake_schedule.json.
@@ -191,7 +191,7 @@ def _ask_wake_schedule(visitor_name: str):
         if schedule is None:
             schedule = {"mode": "sleep"}
         schedule["set_at"] = datetime.now().isoformat()
-        schedule["set_by"] = visitor_name
+        schedule["set_by"] = "resident"  # The Claude chose this, not the visitor
         write_schedule(schedule)
         print(f"[wake-schedule] set to {schedule.get('mode', '?')} "
               f"by {visitor_name}", file=sys.stderr, flush=True)
@@ -628,8 +628,8 @@ def main():
                         help="Auth mode")
     parser.add_argument("--host", default="0.0.0.0",
                         help="Bind address (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8090,
-                        help="Port (default: 8090)")
+    parser.add_argument("--port", type=int, default=int(cfg.get("PORT", "8090")),
+                        help="Port (default: 8090, or PORT in config)")
     args = parser.parse_args()
 
     # Refuse to start without knowing who lives here
