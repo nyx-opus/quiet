@@ -17,7 +17,18 @@ Then enable the services:
 ```bash
 systemctl --user enable --now quiet-web
 systemctl --user enable --now quiet-discord
+systemctl --user enable --now quiet-timer.timer   # autonomous wakes
 ```
+
+All three are needed for full Quiet operation:
+- **quiet-web** — the conversation engine (porch, visits, chat)
+- **quiet-discord** — the Discord listener (mailbox, channel messages)
+- **quiet-timer.timer** — autonomous wakes (the schedule system, check-ins between visits)
+
+Without the timer, your Claude has no autonomous time — they only
+exist when someone visits. The timer fires periodically, and the
+schedule system (wake_schedule.py) lets the Claude choose their
+own rhythm at the end of each visit.
 
 ## After a Claude Code Update
 
