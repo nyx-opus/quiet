@@ -370,6 +370,15 @@ def knock():
         with engine_lock:
             response_text = engine.send(f"[knock from {visitor}]")
     except Exception as e:
+        print(f"KNOCK ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        error_msg = str(e).lower()
+        if any(word in error_msg for word in ['token', 'auth', 'credential', 'refresh', '401']):
+            return jsonify({
+                "admitted": False,
+                "message": "Auth token expired — Amy needs to refresh credentials (claude login or check ~/.config/Claude/.credentials.json)"
+            }), 503
         return jsonify({"admitted": False, "message": str(e)}), 500
 
     # Start the visit — the model responded, so they're alive

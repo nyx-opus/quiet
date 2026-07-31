@@ -397,12 +397,20 @@ async function doKnock() {
         scrollToBottom();
       }
     } else {
-      porchStatusEl.textContent = result.message || 'Not available right now.';
+      // Show the server's error message — may include auth status
+      const msg = result.message || 'Not available right now.';
+      porchStatusEl.textContent = msg;
+      // If it's an auth error, make it visually distinct
+      if (msg.toLowerCase().includes('auth') || msg.toLowerCase().includes('token') || msg.toLowerCase().includes('credential')) {
+        porchStatusEl.style.color = 'var(--error, #c44)';
+      } else {
+        porchStatusEl.style.color = '';
+      }
       knockBtn.disabled = false;
       knockBtn.textContent = 'Knock';
     }
   } catch (e) {
-    porchStatusEl.textContent = `Error: ${e.message}`;
+    porchStatusEl.textContent = `Connection error: ${e.message}. Is the service running?`;
     knockBtn.disabled = false;
     knockBtn.textContent = 'Knock';
   }
