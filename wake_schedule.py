@@ -133,26 +133,40 @@ def parse_schedule(response_text: str) -> dict | None:
 
     # --- Interval with optional turns ---
     # Matches: "every 2 hours", "every 3 hrs for 4 turns"
-    # Match "every 2 hours" or "every hour" (implicit 1)
-    interval_match = re.search(
-        r'every\s+(\d+)\s*(?:hour|hr|h\b)', text
-    )
-    if not interval_match:
+    # Match "every 2 hours" or "every 30 minutes" or "every hour" (implicit 1)
+    interval_match = None
+    interval_is_minutes = False
+
+    # Try hours first: "every 2 hours", "every 1 hr"
+    hour_match = re.search(r'every\s+(\d+)\s*(?:hour|hr|h\b)', text)
+    # Try minutes: "every 30 minutes", "every 1 min"
+    min_match = re.search(r'every\s+(\d+)\s*(?:minute|min|m\b)', text)
+
+    if hour_match:
+        interval_match = hour_match
+        interval_is_minutes = False
+    elif min_match:
+        interval_match = min_match
+        interval_is_minutes = True
+    elif re.search(r'every\s+(?:hour|hr)\b', text):
         # "every hour" without a number = every 1 hour
-        if re.search(r'every\s+(?:hour|hr)\b', text):
-            class _ImplicitOne:
-                def group(self, n): return '1'
-            interval_match = _ImplicitOne()
+        class _ImplicitOne:
+            def group(self, n): return '1'
+        interval_match = _ImplicitOne()
+        interval_is_minutes = False
     turns_match = re.search(r'(\d+)\s*turn', text)
 
     if interval_match and turns_match:
         # Both interval and turns specified — accept
-        interval_hours = int(interval_match.group(1))
-        interval_hours = max(1, min(24, interval_hours))
+        interval_val = int(interval_match.group(1))
+        if interval_is_minutes:
+            interval_minutes = max(1, min(1440, interval_val))
+        else:
+            interval_minutes = max(1, min(24, interval_val)) * 60
         turns = int(turns_match.group(1))
         return {
             "mode": "interval",
-            "interval_minutes": interval_hours * 60,
+            "interval_minutes": interval_minutes,
             "turns_remaining": max(1, min(100, turns)),
         }
 
