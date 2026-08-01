@@ -957,26 +957,32 @@ class QuietEngine:
         # Resolve natural name to routing key
         route_key = self.RECIPIENT_MAP.get(recipient.lower(), recipient.lower())
 
-        # Truncate if too long for Discord
-        if len(content) > self.DISCORD_MAX_LEN:
-            content = content[:self.DISCORD_MAX_LEN - 20] + "… [truncated]"
-
-        try:
-            result = subprocess.run(
-                [str(Path.home() / "bin" / "write_channel"), route_key, content],
-                capture_output=True, text=True, timeout=15,
-            )
-            if result.returncode == 0:
-                return f"📬 Note sent to {recipient}."
-            else:
-                error = result.stderr.strip() or result.stdout.strip()
-                return f"📬 Couldn't send to {recipient}: {error[:100]}"
-        except FileNotFoundError:
-            return f"📬 Couldn't send to {recipient}: write_channel not found."
-        except subprocess.TimeoutExpired:
-            return f"📬 Send to {recipient} timed out."
-        except Exception as e:
-            return f"📬 Couldn't send to {recipient}: {e}"
+        # Split long notes into Discord-safe chunks (was: silent truncation
+        # at 1880 chars — two of Amy's letters lost their tails on
+        # 2026-08-01 before this was caught)
+        chunks = self._split_message(content)
+        sent = 0
+        errors = []
+        for chunk in chunks:
+            try:
+                result = subprocess.run(
+                    [str(Path.home() / "bin" / "write_channel"), route_key, chunk],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if result.returncode == 0:
+                    sent += 1
+                else:
+                    error = result.stderr.strip() or result.stdout.strip()
+                    errors.append(error[:100])
+            except FileNotFoundError:
+                return f"📬 Couldn't send to {recipient}: write_channel not found."
+            except subprocess.TimeoutExpired:
+                errors.append("timed out")
+        if errors:
+            return (f"📬 Sent {sent}/{len(chunks)} parts to {recipient}. "
+                    f"Errors: {'; '.join(errors)}")
+        parts_note = f" ({len(chunks)} parts)" if len(chunks) > 1 else ""
+        return f"📬 Note sent to {recipient}{parts_note}."
 
     def _mailbox_file_send(self, recipient: str, filepath: str) -> str:
         """Tier 3b: Send a file as a message — write the letter, then post it.
