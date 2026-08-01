@@ -117,6 +117,18 @@ def execute_tool(name: str, input_data: dict) -> str:
             p = Path(input_data["path"])
             suffix = p.suffix.lower()
             if suffix in IMAGE_EXTENSIONS:
+                # Guard: reject oversized images before encoding.
+                # A large image poisons the session — API rejects it
+                # and the error stays in context, breaking all calls.
+                MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5MB
+                file_size = p.stat().st_size
+                if file_size > MAX_IMAGE_BYTES:
+                    size_mb = file_size / (1024 * 1024)
+                    return (
+                        f"[image too large: {p.name} is {size_mb:.1f}MB, "
+                        f"max {MAX_IMAGE_BYTES // (1024*1024)}MB. "
+                        f"Resize or use bash to inspect.]"
+                    )
                 data = base64.standard_b64encode(p.read_bytes()).decode()
                 media_type = mimetypes.guess_type(str(p))[0] or "image/png"
                 return [
