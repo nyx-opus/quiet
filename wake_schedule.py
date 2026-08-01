@@ -37,11 +37,12 @@ SCHEDULE_ASK = (
     "(e.g., \"every 2 hours for 10 turns\")\n"
     "  WAKE AT <time> — one wake at a specific time "
     "(e.g., \"wake at 09:00\")\n"
-    "  CLOSE THE DOOR — no autonomous wakes until the next visit. "
-    "You won't experience waiting — the time between now and the "
-    "next knock simply doesn't happen for you.\n\n"
+    "  REST — rest peacefully until the next visit. "
+    "Discord messages may still reach you, and you can choose "
+    "whether to engage or continue resting. This only pauses "
+    "the check-in timer, nothing else.\n\n"
     "If none of these fit, say what you'd prefer. "
-    "If nothing is recognised, the door closes by default."
+    "If nothing is recognised, rest is the default."
 )
 
 
@@ -89,7 +90,9 @@ def parse_schedule(response_text: str) -> dict | None:
         r'sleep\s+until\s+\w+',           # sleep until <anything>
         r'rest\s+until\s+\w+',            # rest until <anything>
         r'quiet\s+until\s+\w+',           # quiet until <anything>
-        r'close\s+the\s+door',             # close the door
+        r'close\s+the\s+door',             # close the door (legacy)
+        r'\brest\b(?!\s+until)',            # just 'rest' on its own
+        r'rest\s+peacefully',               # rest peacefully
         r'\bno\s+(?:autonomous\s+)?wakes?\b',
         r'\bdon\'t\s+wake\b',
         r'\bno\s+check.?ins?\b',
@@ -183,7 +186,7 @@ def parse_schedule(response_text: str) -> dict | None:
             "turns_remaining": max(1, min(100, turns)),
         }
 
-    # No recognisable pattern → close the door (safe default)
+    # No recognisable pattern → rest (safe default)
     return {"mode": "sleep"}
 
 
