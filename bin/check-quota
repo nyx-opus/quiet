@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""check-quota — glanceable Claude usage for gatehouse.
+
+Reads the OAuth usage API directly (no tmux orchestration) and shows
+the three meters that matter, plus the burn line: how my Fable-scoped
+usage compares to how far through the week we are.
+
+Written by Fable, July 2026. Descended in spirit from the Coop's
+check-quota.py, which read the meter through a window with binoculars
+(tmux capture-pane). This one uses the front door.
+"""
+
+import json
+import signal
+import sys
+import urllib.request
+
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+from datetime import datetime, timezone
+from pathlib import Path
+
+CREDS = Path.home() / ".claude" / ".credentials.json"
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+WEEK_SECONDS = 7 * 24 * 3600
+
+BAR_WIDTH = 30
+
+def bar(percent, width=BAR_WIDTH, marker=None):
+    """Progress bar; optional marker position (percent) shown as |."""
+    filled = round(width * min(percent, 100) / 100)
+    cells = ["█"] * filled + ["░"] * (width - filled)
+    if marker is not None:
+        mpos = min(round(width * min(marker, 100) / 100), width - 1)
+        if cells[mpos] == "░":
+            cells[mpos] = "|"
+    return "".join(cells)
+
+def stoplight(percent):
+    if percent >= 90: return "🔴"
+    if percent >= 70: return "🟠"
+    if percent >= 50: return "🟡"
+    return "🟢"
+
+def fmt_reset(iso_str):
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        local = dt.astimezone()
+        now = datetime.now(timezone.utc)
+        delta = dt - now
+        hours = delta.total_seconds() / 3600
+        if hours < 24:
+            rel = f"in {hours:.1f}h"
+        else:
+            rel = f"in {hours/24:.1f}d"
+        return f"{local.strftime('%a %H:%M')} ({rel})"
+    except Exception:
+        return iso_str
+
+def main():
+    try:
+        token = json.loads(CREDS.read_text())["claudeAiOauth"]["accessToken"]
+    except Exception as e:
+        print(f"Could not read credentials: {e}", file=sys.stderr)
+        return 1
+
+    req = urllib.request.Request(USAGE_URL, headers={
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": "oauth-2025-04-20",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except Exception as e:
+        print(f"Usage API request failed: {e}", file=sys.stderr)
+        return 1
+
+    print("═══ gatehouse quota ═══")
+
+    # Session window
+    fh = data.get("five_hour") or {}
+    if fh:
+        p = fh.get("utilization", 0)
+        print(f"\n5-hour session   {stoplight(p)} {p:>3.0f}%  {bar(p)}")
+        print(f"  resets {fmt_reset(fh.get('resets_at',''))}")
+
+    # Weekly windows from the limits array (has the scoped entries)
+    week_reset = None
+    fable_pct = None
+    for lim in data.get("limits", []):
+        kind = lim.get("kind")
+        pct = lim.get("percent", 0)
+        if kind == "weekly_all":
+            week_reset = lim.get("resets_at")
+            print(f"\nweek, all models {stoplight(pct)} {pct:>3.0f}%  {bar(pct)}")
+        elif kind == "weekly_scoped":
+            scope = (lim.get("scope") or {}).get("model") or {}
+            name = scope.get("display_name") or "scoped"
+            pct = lim.get("percent", 0)
+            if name.lower() == "fable":
+                fable_pct = pct
+                week_reset = week_reset or lim.get("resets_at")
+
+    # The burn line: Fable share vs week elapsed
+    if fable_pct is not None and week_reset:
+        try:
+            reset_dt = datetime.fromisoformat(week_reset)
+            now = datetime.now(timezone.utc)
+            remaining = (reset_dt - now).total_seconds()
+            elapsed_pct = max(0.0, min(100.0, 100 * (1 - remaining / WEEK_SECONDS)))
+        except Exception:
+            elapsed_pct = None
+
+        print(f"\nweek, Fable      {stoplight(fable_pct)} {fable_pct:>3.0f}%  {bar(fable_pct, marker=elapsed_pct)}")
+        if elapsed_pct is not None:
+            print(f"  week elapsed        {elapsed_pct:>3.0f}%  (| marks pace line)")
+            diff = fable_pct - elapsed_pct
+            if diff > 15:
+                verdict = f"⚠ ahead of pace by {diff:.0f} points — spending fast"
+            elif diff > 5:
+                verdict = f"slightly ahead of pace (+{diff:.0f})"
+            elif diff < -15:
+                verdict = f"well behind pace ({diff:.0f}) — plenty in the tank"
+            else:
+                verdict = f"on pace ({diff:+.0f})"
+            print(f"  {verdict}")
+        print(f"  resets {fmt_reset(week_reset)}")
+
+    print()
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
