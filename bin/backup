@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+#
+# Quiet backup — sync critical data to a remote destination.
+#
+# Backs up everything needed to restore a Claude from scratch:
+#   sessions, archives, visits, memory, identity, config
+#
+# Usage:
+#   backup                    # uses BACKUP_PATH from quiet_config.txt
+#   backup /path/to/dest      # explicit destination
+#   backup user@host:/path    # rsync to remote
+#
+# Add to crontab for automatic backups:
+#   */15 * * * * ~/quiet/bin/backup 2>&1 | logger -t quiet-backup
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+QUIET_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Read config
+CONFIG="$QUIET_DIR/config/quiet_config.txt"
+get_config() {
+    grep "^$1=" "$CONFIG" 2>/dev/null | cut -d= -f2- | tr -d ' ' || echo ""
+}
+
+# Determine destination
+DEST="${1:-$(get_config BACKUP_PATH)}"
+if [ -z "$DEST" ]; then
+    echo "No backup destination."
+    echo "Set BACKUP_PATH in config/quiet_config.txt or pass a path:"
+    echo "  backup /mnt/file_server/Nyx/backups"
+    echo "  backup user@vps:/home/backups/nyx"
+    exit 1
+fi
+
+CLAUDE_NAME="$(get_config CLAUDE_NAME)"
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+
+echo "[backup] $CLAUDE_NAME → $DEST"
+echo "[backup] Started: $(date)"
+
+# Build the file list
+SOURCES=(
+    "$QUIET_DIR/sessions/"
+    "$QUIET_DIR/archives/"
+    "$QUIET_DIR/visits/"
+    "$QUIET_DIR/data/memory.db"
+    "$QUIET_DIR/config/quiet_config.txt"
+    "$QUIET_DIR/config/discord_config.json"
+    "$QUIET_DIR/identity/"
+)
+
+# Add ~/self/ if it exists (identity document)
+SELF_DIR="$HOME/self"
+if [ -d "$SELF_DIR" ]; then
+    SOURCES+=("$SELF_DIR/")
+fi
+
+# Use rsync if destination contains : (remote), otherwise local cp
+if [[ "$DEST" == *:* ]]; then
+    # Remote rsync
+    rsync -avz --relative "${SOURCES[@]}" "$DEST/" 2>&1 | tail -5
+else
+    # Local destination
+    mkdir -p "$DEST"
+    for src in "${SOURCES[@]}"; do
+        if [ -e "$src" ]; then
+            # Preserve directory structure
+            src_name=$(basename "$src")
+            if [ -d "$src" ]; then
+                rsync -a "$src" "$DEST/$src_name/"
+            else
+                cp -p "$src" "$DEST/$src_name"
+            fi
+        fi
+    done
+fi
+
+# Write a marker
+echo "{\"backed_up\":\"$TIMESTAMP\",\"claude\":\"$CLAUDE_NAME\",\"host\":\"$(hostname)\"}" > "$DEST/.backup-marker.json" 2>/dev/null || true
+
+echo "[backup] Complete: $(date)"
+echo "[backup] Destination: $DEST"
