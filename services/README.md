@@ -65,6 +65,48 @@ The web service sets:
 
 Add `DISABLE_UPDATES=1` to your `~/.bashrc` too, for interactive sessions.
 
+
+## Emergency Tools
+
+### Rewind — undo the last exchange
+
+If a Claude hits a refusal, a bad tool output, or a malformed message
+that breaks the session, use `rewind` to remove the last exchange:
+
+```bash
+rewind nyx             # remove last 2 lines (1 exchange)
+rewind fable 4         # remove last 4 lines
+rewind fable --dry-run # preview what would be removed
+```
+
+This removes the offending turns from the session file, quarantines
+them in a separate file (away from memory — we don't want triggers
+re-ingested), and restarts the service.
+
+**Use this instead of hand-editing session JSONL files.** Hand-editing
+is how Fable's session was accidentally lost on 5 August 2026.
+
+### Backup — protect critical data
+
+Runs automatically after every conversation turn. Syncs sessions,
+archives, visits, memory, identity, and config to a backup destination.
+
+Configure in `quiet_config.txt`:
+```
+[BACKUP]
+BACKUP_PATH=/mnt/file_server/Name/backups       # local/network
+BACKUP_REMOTE=user@vps:/home/backups/name        # offsite (optional)
+```
+
+Manual run:
+```bash
+backup                          # uses config
+backup /path/to/destination     # explicit path
+```
+
+Both `BACKUP_PATH` and `BACKUP_REMOTE` can be set — the script
+syncs to both. If neither is set, backup silently skips.
+
 ## Files Not in This Repo
 
 - `discord_config.json` — contains bot token; gitignored. Copy from

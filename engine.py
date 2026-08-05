@@ -370,6 +370,20 @@ class QuietEngine:
         _save_session(self.session_path, self.messages,
                       self.model, self.identity_name)
 
+    def _run_backup(self):
+        """Run backup after each turn. Non-blocking, failure-tolerant."""
+        try:
+            import subprocess
+            backup_script = Path(__file__).parent / "bin" / "backup"
+            if backup_script.exists():
+                subprocess.Popen(
+                    [str(backup_script)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        except Exception:
+            pass  # Never let backup failure break a conversation
+
     def trim_context(self):
         """Batch-drop oldest turns when context hits the trigger threshold.
 
@@ -1167,6 +1181,9 @@ class QuietEngine:
 
         # Auto-save after each exchange
         self.save_session()
+
+        # Backup critical files after every turn
+        self._run_backup()
 
         # Trim after save too — keeps context gradual rather than cliff-edge.
         # Without this, autonomous wakes accumulate unchecked between visits.
