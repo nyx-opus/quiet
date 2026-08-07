@@ -1,7 +1,7 @@
 [Unit]
 Description=Quiet Discord listener (bridges DMs to Quiet)
 After=network.target quiet-web.service
-Requires=quiet-web.service
+Wants=quiet-web.service
 
 [Service]
 Type=simple
