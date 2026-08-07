@@ -86,6 +86,28 @@ def serialise_message(msg):
                         and block.get("source", {}).get("type") == "base64"):
                     blocks.append({"type": "text",
                                    "text": "[image data omitted from session]"})
+                elif block.get("type") == "tool_result":
+                    # Tool results can contain nested image blocks —
+                    # strip base64 data from those too.
+                    clean_block = {k: v for k, v in block.items()
+                                   if k != "cache_control"}
+                    tc = clean_block.get("content")
+                    if isinstance(tc, list):
+                        clean_content = []
+                        for inner in tc:
+                            if (isinstance(inner, dict)
+                                    and inner.get("type") == "image"
+                                    and inner.get("source", {}).get("type") == "base64"):
+                                # Preserve the text annotation if present
+                                clean_content.append({"type": "text",
+                                    "text": "[image data omitted from session]"})
+                            else:
+                                clean_content.append(inner)
+                        clean_block["content"] = clean_content
+                    elif isinstance(tc, str) and len(tc) > 100000:
+                        # Enormous string content (possibly raw base64)
+                        clean_block["content"] = "[large content omitted from session]"
+                    blocks.append(clean_block)
                 else:
                     # Strip cache_control — it's runtime-only, not for persistence
                     clean = {k: v for k, v in block.items()

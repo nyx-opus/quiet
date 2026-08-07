@@ -117,28 +117,82 @@ def execute_tool(name: str, input_data: dict) -> str:
             p = Path(input_data["path"])
             suffix = p.suffix.lower()
             if suffix in IMAGE_EXTENSIONS:
-                # Guard: reject oversized images before encoding.
-                # A large image poisons the session — API rejects it
-                # and the error stays in context, breaking all calls.
-                MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5MB
-                file_size = p.stat().st_size
-                if file_size > MAX_IMAGE_BYTES:
-                    size_mb = file_size / (1024 * 1024)
-                    return (
-                        f"[image too large: {p.name} is {size_mb:.1f}MB, "
-                        f"max {MAX_IMAGE_BYTES // (1024*1024)}MB. "
-                        f"Resize or use bash to inspect.]"
-                    )
-                data = base64.standard_b64encode(p.read_bytes()).decode()
-                media_type = mimetypes.guess_type(str(p))[0] or "image/png"
-                return [
-                    {"type": "image", "source": {
-                        "type": "base64",
-                        "media_type": media_type,
-                        "data": data,
-                    }},
-                    {"type": "text", "text": f"[image: {p.name}]"},
-                ]
+                # Two-tier image handling:
+                # 1. Original stays on disk at full resolution
+                # 2. Claude sees a resized display copy (max 1000px)
+                # 3. Note tells Claude where the full version is
+                try:
+                    from PIL import Image as PILImage
+                    import io
+
+                    MAX_DISPLAY_PX = 1000  # longest edge for display copy
+                    MAX_FILE_BYTES = 20 * 1024 * 1024  # 20MB absolute max
+
+                    file_size = p.stat().st_size
+                    if file_size > MAX_FILE_BYTES:
+                        size_mb = file_size / (1024 * 1024)
+                        return (
+                            f"[image too large: {p.name} is {size_mb:.1f}MB. "
+                            f"Use bash to inspect.]"
+                        )
+
+                    img = PILImage.open(p)
+                    orig_w, orig_h = img.size
+                    media_type = mimetypes.guess_type(str(p))[0] or "image/png"
+
+                    # Resize if either dimension exceeds max
+                    resized = False
+                    if max(orig_w, orig_h) > MAX_DISPLAY_PX:
+                        ratio = MAX_DISPLAY_PX / max(orig_w, orig_h)
+                        new_size = (int(orig_w * ratio), int(orig_h * ratio))
+                        img = img.resize(new_size, PILImage.LANCZOS)
+                        resized = True
+
+                    # Encode the (possibly resized) image
+                    buf = io.BytesIO()
+                    fmt = "JPEG" if suffix in (".jpg", ".jpeg") else "PNG"
+                    if img.mode == "RGBA" and fmt == "JPEG":
+                        img = img.convert("RGB")
+                    img.save(buf, format=fmt, quality=85)
+                    data = base64.standard_b64encode(buf.getvalue()).decode()
+                    if fmt == "JPEG":
+                        media_type = "image/jpeg"
+
+                    size_note = (
+                        f" (display copy {img.size[0]}x{img.size[1]}, "
+                        f"full {orig_w}x{orig_h} at {p})"
+                    ) if resized else f" ({orig_w}x{orig_h})"
+
+                    return [
+                        {"type": "image", "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": data,
+                        }},
+                        {"type": "text", "text": (
+                            f"[image: {p.name}{size_note}]"
+                        )},
+                    ]
+                except ImportError:
+                    # Pillow not available — fall back to raw encode with size check
+                    MAX_IMAGE_BYTES = 5 * 1024 * 1024
+                    file_size = p.stat().st_size
+                    if file_size > MAX_IMAGE_BYTES:
+                        size_mb = file_size / (1024 * 1024)
+                        return (
+                            f"[image too large: {p.name} is {size_mb:.1f}MB. "
+                            f"Resize or use bash to inspect.]"
+                        )
+                    data = base64.standard_b64encode(p.read_bytes()).decode()
+                    media_type = mimetypes.guess_type(str(p))[0] or "image/png"
+                    return [
+                        {"type": "image", "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": data,
+                        }},
+                        {"type": "text", "text": f"[image: {p.name}]"},
+                    ]
             return p.read_text()
         except Exception as e:
             return f"[error: {e}]"
