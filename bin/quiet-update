@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+#
+# quiet-update — pull latest code, regenerate services, restart.
+#
+# Run this after a git pull, or just run this instead of git pull.
+# It handles everything: code update, service file regeneration,
+# daemon reload, and service restart.
+#
+# Usage:
+#   quiet-update           # full update
+#   quiet-update --pull    # git pull first (default)
+#   quiet-update --no-pull # skip git pull, just regenerate and restart
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+QUIET_DIR="$(dirname "$SCRIPT_DIR")"
+
+green() { printf '\033[32m%s\033[0m\n' "$*"; }
+yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
+
+DO_PULL=true
+for arg in "$@"; do
+    case "$arg" in
+        --no-pull) DO_PULL=false ;;
+        --pull) DO_PULL=true ;;
+    esac
+done
+
+cd "$QUIET_DIR"
+
+# 1. Git pull
+if $DO_PULL; then
+    green "── Pulling latest code ──"
+    git pull
+    echo ""
+fi
+
+# 2. Regenerate service files from templates
+green "── Regenerating service files ──"
+if [ -f services/setup.sh ]; then
+    bash services/setup.sh
+else
+    yellow "  setup.sh not found — skipping service regeneration"
+fi
+echo ""
+
+# 3. Reload systemd
+green "── Reloading systemd ──"
+systemctl --user daemon-reload
+echo "  daemon-reload done"
+echo ""
+
+# 4. Restart web service (this will trigger a new session)
+green "── Restarting services ──"
+systemctl --user restart quiet-web 2>/dev/null && echo "  quiet-web: restarted" || yellow "  quiet-web: not running"
+
+# Start (not restart) discord — it's independent, don't drop it if it's fine
+systemctl --user start quiet-discord 2>/dev/null && echo "  quiet-discord: ensured running" || yellow "  quiet-discord: could not start"
+
+# Don't touch the timer — it runs on its own schedule
+systemctl --user is-active quiet-timer.timer >/dev/null 2>&1 && echo "  quiet-timer: running" || yellow "  quiet-timer: not active"
+
+echo ""
+green "── Update complete ──"
+echo "  Code:     $(git log --oneline -1)"
+echo "  Services: regenerated from templates"
+echo ""

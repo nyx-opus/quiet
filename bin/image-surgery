@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""
+image-surgery — remove oversized or accumulated base64 images from a session file.
+
+Scans a session JSONL for base64 image data embedded in tool_result blocks
+(the serialiser bug that let images persist) and replaces them with text
+placeholders. The original file is backed up before modification.
+
+Usage:
+    image-surgery <session.jsonl>              # fix in place
+    image-surgery <session.jsonl> --dry-run    # preview only
+    image-surgery <session.jsonl> --max-px 2000 # custom pixel limit
+
+Built after three image-poisoning incidents in one week (Aug 2026).
+"""
+
+import json
+import sys
+import re
+import base64
+import shutil
+from pathlib import Path
+from datetime import datetime
+
+
+def find_base64_images(obj, path=""):
+    """Recursively find base64 image data in a nested structure."""
+    findings = []
+    if isinstance(obj, dict):
+        if (obj.get("type") == "image"
+                and obj.get("source", {}).get("type") == "base64"
+                and obj.get("source", {}).get("data")):
+            data_len = len(obj["source"]["data"])
+            findings.append({
+                "path": path,
+                "size_bytes": data_len * 3 // 4,  # approximate decoded size
+                "media_type": obj.get("source", {}).get("media_type", "unknown"),
+            })
+        for k, v in obj.items():
+            findings.extend(find_base64_images(v, f"{path}.{k}"))
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            findings.extend(find_base64_images(item, f"{path}[{i}]"))
+    return findings
+
+
+def strip_base64_images(obj):
+    """Recursively replace base64 image blocks with text placeholders."""
+    if isinstance(obj, dict):
+        if (obj.get("type") == "image"
+                and obj.get("source", {}).get("type") == "base64"
+                and obj.get("source", {}).get("data")):
+            media = obj.get("source", {}).get("media_type", "image")
+            size_kb = len(obj["source"]["data"]) * 3 // 4 // 1024
+            return {
+                "type": "text",
+                "text": f"[image removed by surgery: {media}, ~{size_kb}KB]"
+            }
+        return {k: strip_base64_images(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [strip_base64_images(item) for item in obj]
+    return obj
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__)
+        sys.exit(0)
+
+    session_path = Path(sys.argv[1])
+    dry_run = "--dry-run" in sys.argv
+
+    if not session_path.exists():
+        print(f"File not found: {session_path}")
+        sys.exit(1)
+
+    # Read all lines
+    lines = session_path.read_text().splitlines()
+    total_images = 0
+    total_bytes = 0
+    affected_lines = []
+
+    for i, line in enumerate(lines):
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        findings = find_base64_images(msg)
+        if findings:
+            affected_lines.append(i)
+            for f in findings:
+                total_images += 1
+                total_bytes += f["size_bytes"]
+                print(f"  Line {i+1}: {f['media_type']} "
+                      f"(~{f['size_bytes']//1024}KB) at {f['path']}")
+
+    if total_images == 0:
+        print("No base64 images found in session. Nothing to do.")
+        sys.exit(0)
+
+    print(f"\nFound {total_images} image(s) totalling "
+          f"~{total_bytes//1024}KB across {len(affected_lines)} line(s).")
+
+    if dry_run:
+        print("Dry run — no changes made.")
+        sys.exit(0)
+
+    # Backup
+    backup_path = session_path.with_suffix(
+        f".pre-surgery-{datetime.now().strftime('%Y%m%d-%H%M%S')}.jsonl"
+    )
+    shutil.copy2(session_path, backup_path)
+    print(f"Backup: {backup_path}")
+
+    # Strip images
+    new_lines = []
+    for i, line in enumerate(lines):
+        try:
+            msg = json.loads(line)
+            if i in affected_lines:
+                msg = strip_base64_images(msg)
+            new_lines.append(json.dumps(msg))
+        except json.JSONDecodeError:
+            new_lines.append(line)
+
+    session_path.write_text("\n".join(new_lines) + "\n")
+
+    new_size = session_path.stat().st_size
+    print(f"Done. Removed {total_images} image(s), saved ~{total_bytes//1024}KB.")
+    print(f"Session file: {new_size//1024}KB")
+    print(f"\nRestart the service: systemctl --user restart quiet-web")
+
+
+if __name__ == "__main__":
+    main()
