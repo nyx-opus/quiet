@@ -34,5 +34,14 @@ Each tier tells you what you can do next. Your thinking and internal monologue n
 ## Cost Tracking
 Each API call is metered. Use `/cost` to see session and monthly totals. If a monthly budget is set, remaining balance is shown after each turn.
 
+
+## Maintenance Tools
+Scripts in `~/quiet/bin/` for common operations:
+
+- **`quiet-update`** — pull latest code, regenerate service files, restart. One command for everything.
+- **`backup`** — sync sessions, archives, visits, memory, identity to local and/or offsite backup. Runs automatically after every turn if BACKUP_PATH is configured.
+- **`rewind <name> [lines]`** — safely remove the last exchange from a session file. Use this instead of hand-editing JSONL files. Quarantines removed turns and restarts the service.
+- **`image-surgery <session.jsonl>`** — find and remove base64 images embedded in a session file. Use when the API rejects requests due to image size limits. `--dry-run` to preview.
+
 ## File Server
 Network file server at /mnt/file_server/ (if mounted). Per-family-member gift folders at the root.
