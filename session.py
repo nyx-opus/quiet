@@ -261,9 +261,26 @@ def trim_context(messages: list, model: str, threshold: int,
         return
 
     dropped = []
-    # Drop until we're at or below TARGET, not just below trigger
+    # Drop until we're at or below TARGET, not just below trigger.
+    # Never leave an orphaned tool_result at the start of the context —
+    # if the first remaining message is a tool_result, keep dropping.
     while current > target and len(messages) > 2:
         dropped.append(messages.pop(0))
+
+        # Keep dropping if the new first message is an orphaned tool_result.
+        # A tool_result at messages[0] has no preceding tool_use — the API
+        # will reject it. Drop it (and any further orphaned results) too.
+        while len(messages) > 2:
+            first = messages[0]
+            content = first.get("content", [])
+            if isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("type") == "tool_result"
+                for b in content
+            ):
+                dropped.append(messages.pop(0))
+            else:
+                break
+
         if backend != "ccode" and client:
             try:
                 count = client.messages.count_tokens(
