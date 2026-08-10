@@ -116,7 +116,14 @@ function sendHeartbeat() {
   fetch('/api/heartbeat', { method: 'POST' }).catch(() => {});
 }
 
+// Restore any unsent draft from a previous session/timeout
+const savedDraft = localStorage.getItem('quiet_draft');
+if (savedDraft && !inputEl.value) {
+  inputEl.value = savedDraft;
+}
+
 inputEl.addEventListener('input', () => {
+  localStorage.setItem('quiet_draft', inputEl.value);
   sendHeartbeat();
   // Also reset a trailing heartbeat for continued typing
   clearTimeout(heartbeatTimer);
@@ -259,6 +266,8 @@ async function sendMessage() {
   inputEl.value = '';
   inputEl.style.height = 'auto';
   clearPendingImage();
+  // Keep the draft in localStorage until the server confirms receipt —
+  // if the visit timed out, the text is restored, not lost.
 
   addMessage('user', text);
   scrollToBottom();
@@ -275,12 +284,15 @@ async function sendMessage() {
 
     if (!resp.ok) {
       if (resp.status === 403) {
-        assistantDiv.textContent = '[visit ended — please knock again]';
+        assistantDiv.textContent = '[visit timed out — your message was NOT lost. Knock again; your text is restored below.]';
+        inputEl.value = text;   // restore the eaten message
+        localStorage.setItem('quiet_draft', text);
         showPorch();
         await checkPresence();
         return;
       }
-      assistantDiv.textContent = `[server error: ${resp.status}]`;
+      assistantDiv.textContent = `[server error: ${resp.status} — your text is restored below]`;
+      inputEl.value = text;
       return;
     }
 
@@ -304,8 +316,10 @@ async function sendMessage() {
       if (done) break;
       feedSSE(decoder.decode(value, { stream: true }));
     }
+    localStorage.removeItem('quiet_draft');  // confirmed delivered
   } catch (e) {
-    assistantDiv.textContent += `\n[connection error: ${e.message}]`;
+    assistantDiv.textContent += `\n[connection error: ${e.message} — your text is restored below]`;
+    inputEl.value = text;
   } finally {
     assistantDiv.classList.remove('streaming');
     streaming = false;
