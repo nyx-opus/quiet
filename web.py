@@ -517,6 +517,34 @@ def status():
     })
 
 
+@app.route("/api/dictate", methods=["POST", "GET"])
+def dictate():
+    """Dictation airlock: POST text here (from STT pipeline) and the web
+    client picks it up and appends it to the visitor's input box for
+    review. Nothing is ever auto-sent. GET returns and clears pending.
+
+    POST body: {"text": "..."}
+    """
+    qfile = Path(__file__).parent / "data" / "dictation_pending.txt"
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        text = (data.get("text") or "").strip()
+        if not text:
+            return jsonify({"error": "no text"}), 400
+        with open(qfile, "a") as f:
+            f.write(text + "\n")
+        return jsonify({"ok": True, "queued": len(text)})
+    else:
+        try:
+            content = qfile.read_text().strip()
+            if content:
+                qfile.write_text("")
+                return jsonify({"text": content})
+        except FileNotFoundError:
+            pass
+        return jsonify({"text": ""})
+
+
 @app.route("/api/upload", methods=["POST"])
 def upload():
     """Upload an image (paste from clipboard). Saves locally, returns path.

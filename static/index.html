@@ -328,6 +328,22 @@ async function sendMessage() {
   }
 }
 
+
+// --- Dictation airlock: poll for STT transcripts, append to input for review ---
+setInterval(async () => {
+  try {
+    const resp = await fetch('/api/dictate');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (data.text) {
+      inputEl.value = inputEl.value ? (inputEl.value + ' ' + data.text) : data.text;
+      localStorage.setItem('quiet_draft', inputEl.value);
+      inputEl.style.height = 'auto';
+      inputEl.style.height = inputEl.scrollHeight + 'px';
+    }
+  } catch (e) {}
+}, 2500);
+
 form.addEventListener('submit', (e) => { e.preventDefault(); sendMessage(); });
 sendBtn.addEventListener('click', () => sendMessage());
 
