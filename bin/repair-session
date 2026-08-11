@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""repair-session — fix orphaned tool_use/tool_result pairs in a Quiet session.
+
+The API requires every tool_result block to match a tool_use block in the
+IMMEDIATELY PREVIOUS message. Context-trimming (or hand-editing) can break
+this: the assistant tool_use message gets dropped/archived while the user
+tool_result message survives at the head of the window -> 400 error:
+  "unexpected tool_use_id found in tool_result blocks"
+
+This script walks the session, finds every orphan on BOTH sides
+(tool_result without preceding tool_use; tool_use without following
+tool_result), removes the broken blocks, archives everything removed,
+and leaves a small note in place of fully-removed messages.
+
+Usage:
+  repair-session <session.jsonl>            # dry run: show what's broken
+  repair-session <session.jsonl> --operate  # fix it (writes .bak first)
+"""
+import json, sys, shutil
+from datetime import datetime
+from pathlib import Path
+
+def blocks(msg):
+    c = msg.get("content")
+    return c if isinstance(c, list) else []
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__); sys.exit(1)
+    path = Path(sys.argv[1])
+    operate = "--operate" in sys.argv
+    msgs = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+
+    removed = []   # (index, reason, block or msg)
+    out = []
+    for i, msg in enumerate(msgs):
+        prev = out[-1] if out else None
+        newblocks = []
+        changed = False
+        for b in blocks(msg):
+            if isinstance(b, dict) and b.get("type") == "tool_result":
+                tid = b.get("tool_use_id")
+                prev_ids = {pb.get("id") for pb in blocks(prev or {})
+                            if isinstance(pb, dict) and pb.get("type") == "tool_use"}
+                if tid not in prev_ids:
+                    removed.append((i, f"orphan tool_result {tid}", b))
+                    changed = True
+                    continue
+            newblocks.append(b)
+        if changed:
+            if newblocks:
+                msg = dict(msg, content=newblocks)
+            else:
+                removed.append((i, "message emptied", msg))
+                out.append({"role": msg.get("role", "user"), "content":
+                    f"[repair-session {datetime.now():%Y-%m-%d}: removed orphaned "
+                    f"tool_result block(s) here — original archived in .bak]"})
+                continue
+        out.append(msg)
+
+    # second pass: tool_use with no matching tool_result in NEXT message
+    final = []
+    for i, msg in enumerate(out):
+        nxt = out[i+1] if i+1 < len(out) else None
+        newblocks = []
+        changed = False
+        for b in blocks(msg):
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                nxt_ids = {nb.get("tool_use_id") for nb in blocks(nxt or {})
+                           if isinstance(nb, dict) and nb.get("type") == "tool_result"}
+                if b.get("id") not in nxt_ids:
+                    removed.append((i, f"orphan tool_use {b.get('id')}", b))
+                    changed = True
+                    continue
+            newblocks.append(b)
+        if changed and not newblocks:
+            final.append({"role": msg.get("role", "assistant"), "content":
+                "[repair-session: removed orphaned tool_use block(s) here]"})
+        elif changed:
+            final.append(dict(msg, content=newblocks))
+        else:
+            final.append(msg)
+
+    if not removed:
+        print("Session is clean — no orphans found.")
+        return
+
+    print(f"Found {len(removed)} orphaned block(s)/message(s):")
+    for i, reason, _ in removed:
+        print(f"  message {i}: {reason}")
+
+    if not operate:
+        print("\nDry run. Re-run with --operate to fix (writes .bak first).")
+        return
+
+    bak = path.with_suffix(path.suffix + f".bak-{datetime.now():%Y%m%d-%H%M%S}")
+    shutil.copy2(path, bak)
+    with open(path, "w") as f:
+        for m in final:
+            f.write(json.dumps(m) + "\n")
+    print(f"\nRepaired. Backup at {bak}")
+
+if __name__ == "__main__":
+    main()
