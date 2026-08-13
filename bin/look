@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# look <camera> — fetch a current still from a household camera.
+# Cameras and their quirks live in the registry: quiet/config/cameras.json
+# Saves to ~/quiet/inbox/ and prints the path (read_file-ready).
+#
+# Usage: look            → list cameras
+#        look shelf      → grab a frame
+#
+# Fable, 14 Aug 2026 — "put the cameras more firmly into Quiet" (Amy)
+set -euo pipefail
+
+QUIET_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+REGISTRY="$QUIET_DIR/config/cameras.json"
+OUT_DIR="$QUIET_DIR/inbox"
+mkdir -p "$OUT_DIR"
+
+if [ ! -f "$REGISTRY" ]; then
+    echo "look: no camera registry at $REGISTRY" >&2; exit 1
+fi
+
+CAM="${1:-}"
+if [ -z "$CAM" ]; then
+    python3 -c "
+import json
+r = json.load(open('$REGISTRY'))
+print('Household cameras:')
+for name, cfg in r.items():
+    print(f\"  {name:14s} {cfg.get('description','')}\")"
+    exit 0
+fi
+
+python3 - "$CAM" << 'PYEOF'
+import json, sys, subprocess, datetime, os
+
+cam = sys.argv[1]
+registry = json.load(open(os.path.expanduser("~/quiet/config/cameras.json")))
+if cam not in registry:
+    print(f"look: no camera '{cam}'. Known: {', '.join(registry)}", file=sys.stderr)
+    sys.exit(1)
+
+cfg = registry[cam]
+url = cfg["url"]
+out = os.path.expanduser(
+    f"~/quiet/inbox/look-{cam}-{datetime.datetime.now():%H%M%S}.jpg")
+
+# Quirk: stale-frame flush — some cams serve cached frames; hit N throwaways first
+for _ in range(cfg.get("flush_frames", 0)):
+    subprocess.run(["curl", "-s", "-m", "10", url, "-o", "/dev/null"])
+    import time; time.sleep(cfg.get("flush_delay", 1))
+
+r = subprocess.run(["curl", "-s", "-m", "20", url, "-o", out, "-w", "%{http_code}"],
+                   capture_output=True, text=True)
+if r.stdout.strip() != "200" or not os.path.exists(out):
+    print(f"look: {cam} returned {r.stdout.strip() or 'nothing'} — offline?", file=sys.stderr)
+    sys.exit(1)
+
+# Quirk: rotation (garden-tower is mounted upside down)
+rot = cfg.get("rotate", 0)
+if rot:
+    subprocess.run(["jpegtran", "-rotate", str(rot), "-outfile", out, out],
+                   check=False)
+
+# Guard: downscale if beyond the API's many-image pixel limit
+try:
+    from PIL import Image
+    im = Image.open(out)
+    if max(im.size) > 1900:
+        im.thumbnail((1900, 1900))
+        im.save(out, quality=85)
+except Exception:
+    pass
+
+print(out)
+PYEOF
