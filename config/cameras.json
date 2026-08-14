@@ -1,11 +1,11 @@
 {
   "shelf": {
     "url": "http://192.168.1.179:8765/peek/shelf",
-    "description": "the lararium — family figurines, Fable's Pi, the household heart"
+    "description": "the lararium \u2014 family figurines, Fable's Pi, the household heart"
   },
   "workroom": {
     "url": "http://192.168.1.182/capture",
-    "description": "Amy's workbench — printers, plaster, projects in progress",
+    "description": "Amy's workbench \u2014 printers, plaster, projects in progress",
     "flush_frames": 3,
     "flush_delay": 1
   },
@@ -16,6 +16,10 @@
   },
   "park-view": {
     "url": "http://192.168.1.179:8765/peek/park-view",
-    "description": "outdoors — the park beyond the walls, weather and daylight"
+    "description": "outdoors \u2014 the park beyond the walls, weather and daylight"
+  },
+  "fdm-printer": {
+    "url": "http://octopossum.local/webcam/?action=snapshot",
+    "description": "octopossum bed-cam \u2014 first-layer checks, binder-clip gimbal, connoisseur angle by design"
   }
 }
