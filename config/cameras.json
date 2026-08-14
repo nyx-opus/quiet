@@ -21,5 +21,9 @@
   "fdm-printer": {
     "url": "http://octopossum.local/webcam/?action=snapshot",
     "description": "octopossum bed-cam \u2014 first-layer checks, binder-clip gimbal, connoisseur angle by design"
+  },
+  "garden-path": {
+    "url": "http://192.168.1.179:8765/peek/garden-path",
+    "description": "the reolink wildlife cam \u2014 hedgehog-height view up the garden path (via coop server)"
   }
 }
