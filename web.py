@@ -162,7 +162,24 @@ def _do_leave(visitor: str, auto: bool = False):
             schedule["set_at"] = datetime.now().isoformat()
             schedule["set_by"] = "resident"  # The Claude chose this, not the visitor
             write_schedule(schedule)
-            print(f"[wake-schedule] set to {schedule.get('mode', '?')} "
+            # Echo the parsed result so the Claude can catch mismatches
+            mode = schedule.get('mode', '?')
+            if mode == 'timed':
+                wake_at = schedule.get('wake_at', '?')
+                echo = f"[schedule set: wake at {wake_at}]"
+            elif mode == 'interval':
+                mins = schedule.get('interval_minutes', '?')
+                turns = schedule.get('turns_remaining', '?')
+                echo = f"[schedule set: every {mins} minutes for {turns} turns]"
+            elif mode == 'sleep':
+                echo = "[schedule set: resting until next visit]"
+            else:
+                echo = f"[schedule set: {mode}]"
+            try:
+                engine.send(echo)
+            except Exception:
+                pass  # Don't let echo failure break the leave flow
+            print(f"[wake-schedule] set to {mode} "
                   f"by {name}", file=sys.stderr, flush=True)
         except Exception as e:
             print(f"[leave+schedule] error: {e}",

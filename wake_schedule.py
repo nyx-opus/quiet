@@ -97,9 +97,14 @@ def parse_schedule(response_text: str) -> dict | None:
         r'\bdon\'t\s+wake\b',
         r'\bno\s+check.?ins?\b',
     ]
-    for pattern in sleep_patterns:
-        if re.search(pattern, text):
-            return {"mode": "sleep"}
+    # Check sleep patterns ONLY if no wake/interval command exists.
+    # "I will rest and then WAKE AT 20:30" should wake, not sleep.
+    has_wake = re.search(r'wake\s+(?:me\s+)?at\s+\d', text)
+    has_interval = re.search(r'every\s+\d+\s*(?:hours?|hrs?|h\b|minutes?|mins?|m\b)', text)
+    if not has_wake and not has_interval:
+        for pattern in sleep_patterns:
+            if re.search(pattern, text):
+                return {"mode": "sleep"}
 
     # --- Wake at specific time ---
     # Matches: "wake at 09:00", "wake me at 9am", "at 14:30"
