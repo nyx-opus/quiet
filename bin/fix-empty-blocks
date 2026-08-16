@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""fix-empty-blocks — remove/repair empty text blocks in a Quiet session.
+
+The API rejects requests when any message contains a text block whose
+text is empty ("cache_control cannot be set for empty text blocks").
+These blocks typically appear via session-resume markers or trimming.
+
+Usage:
+  fix-empty-blocks <session.jsonl>            # dry run
+  fix-empty-blocks <session.jsonl> --operate  # fix (writes timestamped .bak)
+"""
+import json, sys, shutil
+from datetime import datetime
+from pathlib import Path
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__); sys.exit(1)
+    path = Path(sys.argv[1]); operate = "--operate" in sys.argv
+    msgs = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+    found = []
+    out = []
+    for i, m in enumerate(msgs):
+        c = m.get("content")
+        if isinstance(c, list):
+            newc = []
+            for j, b in enumerate(c):
+                if isinstance(b, dict) and b.get("type") == "text" and not (b.get("text") or "").strip():
+                    found.append((i, j))
+                    continue
+                newc.append(b)
+            if not newc:
+                # message would be empty: keep a single space text block
+                newc = [{"type": "text", "text": " "}]
+                found.append((i, "emptied->stub"))
+            m = dict(m, content=newc)
+        elif isinstance(c, str) and not c.strip():
+            found.append((i, "string"))
+            m = dict(m, content=" ")
+        out.append(m)
+    if not found:
+        print("Clean: no empty text blocks found."); return
+    print(f"Found {len(found)} empty block(s): {found[:10]}{'...' if len(found)>10 else ''}")
+    if not operate:
+        print("Dry run. --operate to fix (writes .bak first)."); return
+    bak = path.with_suffix(path.suffix + f".bak-{datetime.now():%Y%m%d-%H%M%S}")
+    shutil.copy2(path, bak)
+    with open(path, "w") as f:
+        for m in out: f.write(json.dumps(m) + "\n")
+    print(f"Fixed. Backup: {bak}")
+
+if __name__ == "__main__":
+    main()
