@@ -30,13 +30,14 @@ def main():
                     continue
                 newc.append(b)
             if not newc:
-                # message would be empty: keep a single space text block
-                newc = [{"type": "text", "text": " "}]
+                # message would be empty: keep a visible stub (API rejects
+                # whitespace-only text blocks: "must contain non-whitespace")
+                newc = [{"type": "text", "text": "[empty message removed by fix-empty-blocks]"}]
                 found.append((i, "emptied->stub"))
             m = dict(m, content=newc)
         elif isinstance(c, str) and not c.strip():
             found.append((i, "string"))
-            m = dict(m, content=" ")
+            m = dict(m, content="[empty message removed by fix-empty-blocks]")
         out.append(m)
     if not found:
         print("Clean: no empty text blocks found."); return
