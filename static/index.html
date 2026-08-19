@@ -330,7 +330,11 @@ async function sendMessage() {
 
 
 // --- Dictation airlock: poll for STT transcripts, append to input for review ---
+// Polls ONLY while the tab is visible: background tabs previously
+// hammered the server every 2.5s forever (the Firefox immortal-tab
+// spam of 19 Aug). Hidden tab = zero requests.
 setInterval(async () => {
+  if (document.visibilityState !== 'visible') return;
   try {
     const resp = await fetch('/api/dictate');
     if (!resp.ok) return;
