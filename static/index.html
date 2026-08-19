@@ -330,11 +330,25 @@ async function sendMessage() {
 
 
 // --- Dictation airlock: poll for STT transcripts, append to input for review ---
-// Polls ONLY while the tab is visible: background tabs previously
-// hammered the server every 2.5s forever (the Firefox immortal-tab
-// spam of 19 Aug). Hidden tab = zero requests.
+// Deliberately polls even when the tab is HIDDEN: the whole point is
+// routing dictation into Quiet while Amy works elsewhere. The 19 Aug
+// spam fix is single-tab election instead: only the most recently
+// opened/focused tab for this resident polls; stale restored tabs
+// stand down. (Election via localStorage heartbeat.)
+const TAB_ID = Date.now() + '-' + Math.random().toString(36).slice(2);
+function electedTab() {
+  const now = Date.now();
+  const cur = JSON.parse(localStorage.getItem('quiet_dictate_leader') || '{}');
+  if (cur.id === TAB_ID || !cur.beat || now - cur.beat > 8000) {
+    localStorage.setItem('quiet_dictate_leader', JSON.stringify({id: TAB_ID, beat: now}));
+    return true;
+  }
+  return false;
+}
+window.addEventListener('focus', () =>
+  localStorage.setItem('quiet_dictate_leader', JSON.stringify({id: TAB_ID, beat: Date.now()})));
 setInterval(async () => {
-  if (document.visibilityState !== 'visible') return;
+  if (!electedTab()) return;
   try {
     const resp = await fetch('/api/dictate');
     if (!resp.ok) return;
