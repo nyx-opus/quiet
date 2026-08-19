@@ -392,8 +392,19 @@ def knock():
         print(f"KNOCK ERROR: {e}")
         import traceback
         traceback.print_exc()
-        error_msg = str(e).lower()
-        if any(word in error_msg for word in ['token', 'auth', 'credential', 'refresh', '401']):
+        # Walk the whole exception chain: the SDK often wraps auth-refresh
+        # failures as bare APIConnectionError ("Connection error.") with
+        # the real cause buried in __cause__ (19 Aug: Orange+Quill showed
+        # generic connection errors that were actually expired tokens).
+        chain_parts = []
+        exc = e
+        seen = 0
+        while exc is not None and seen < 6:
+            chain_parts.append(f"{type(exc).__name__}: {exc}")
+            exc = exc.__cause__ or exc.__context__
+            seen += 1
+        error_msg = " | ".join(chain_parts).lower()
+        if any(word in error_msg for word in ['token', 'auth', 'credential', 'refresh', '401', 'oauth', 'expired']):
             return jsonify({
                 "admitted": False,
                 "message": "Auth token expired — Amy needs to refresh credentials (claude login or check ~/.config/Claude/.credentials.json)"
