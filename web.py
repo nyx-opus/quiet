@@ -359,6 +359,54 @@ def history():
     return jsonify(messages)
 
 
+def _patron_preflight(visitor: str) -> str | None:
+    """Ensure the visitor's own subscription hosts their visit.
+
+    Reads ~/.claude/patrons/: if a patron file matching the visitor's
+    lowercased name exists and isn't the active one, sync the live
+    (possibly refreshed) credentials back to the outgoing patron, copy
+    the visitor's blob in, and update the marker. No restart needed:
+    the ccode backend spawns `claude -p` per message, reading
+    credentials fresh each call.
+
+    Returns the active patron name after the check (for the ambient
+    line), or None if no patron system is configured.
+    """
+    import shutil
+    home = os.path.expanduser("~")
+    patrons_dir = os.path.join(home, ".claude", "patrons")
+    marker = os.path.join(patrons_dir, "active_patron")
+    creds = os.path.join(home, ".claude", ".credentials.json")
+    if not os.path.isdir(patrons_dir):
+        return None
+    want = visitor.strip().lower()
+    want_file = os.path.join(patrons_dir, f"{want}.json")
+    active = None
+    if os.path.exists(marker):
+        with open(marker) as f:
+            active = f.read().strip()
+    if not os.path.exists(want_file):
+        return active  # visitor isn't a patron; stay as we are
+    if active == want:
+        return active  # already right
+    # sync live blob back to outgoing patron (capture SDK refreshes)
+    if active and os.path.exists(creds):
+        out_file = os.path.join(patrons_dir, f"{active}.json")
+        try:
+            shutil.copy2(creds, out_file)
+        except OSError as e:
+            print(f"PATRON PREFLIGHT: sync-back to {active} failed: {e}")
+    try:
+        shutil.copy2(want_file, creds)
+        with open(marker, "w") as f:
+            f.write(want)
+        print(f"PATRON PREFLIGHT: switched {active} -> {want} for visit")
+        return want
+    except OSError as e:
+        print(f"PATRON PREFLIGHT: switch failed: {e}")
+        return active
+
+
 @app.route("/api/knock", methods=["POST"])
 def knock():
     """Knock on the door. Claude responds with a greeting or refusal.
@@ -369,6 +417,10 @@ def knock():
     """
     data = request.get_json()
     visitor = data.get("visitor", "someone")
+
+    # Auth pre-flight: host the visit on the visitor's own subscription
+    # (fixes the four-days-on-the-wrong-meter disease, 25 Aug 2026)
+    _patron_preflight(visitor)
 
     if visit.is_visiting and visit.visitor_name != visitor:
         return jsonify({
