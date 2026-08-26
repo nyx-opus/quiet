@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""
+health-check — verify Quiet system health and write ambient status.
+
+Checks memory, backups, services, and updates. Writes:
+- One ambient line to stdout (for ambient.md integration)
+- Full details to ~/quiet/data/health.md (queryable)
+
+Designed to run every ~20-30 prompts or on state transitions.
+"""
+
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+QUIET_DIR = Path(__file__).parent.parent
+DATA_DIR = QUIET_DIR / "data"
+CONFIG_PATH = QUIET_DIR / "config" / "quiet_config.txt"
+
+
+def get_config(key):
+    """Read a config value from quiet_config.txt."""
+    try:
+        for line in CONFIG_PATH.read_text().splitlines():
+            if line.startswith(f"{key}="):
+                return line.split("=", 1)[1].strip()
+    except Exception:
+        pass
+    return ""
+
+
+def check_memory():
+    """Check memory database exists and has entries."""
+    db_path = DATA_DIR / "memory.db"
+    if not db_path.exists():
+        return "fail", "memory.db not found"
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute("SELECT COUNT(*) FROM chunks")
+        count = cursor.fetchone()[0]
+        # Check most recent entry
+        try:
+            cursor = conn.execute(
+                "SELECT timestamp FROM chunks ORDER BY timestamp DESC LIMIT 1"
+            )
+            row = cursor.fetchone()
+            last = row[0] if row else "never"
+        except Exception:
+            last = "unknown"
+        conn.close()
+        if count == 0:
+            return "fail", "memory: 0 entries — NOT WORKING"
+        return "ok", f"memory: {count} entries, latest {last}"
+    except Exception as e:
+        return "fail", f"memory: error — {e}"
+
+
+def check_backup_freshness(path, label):
+    """Check when the most recent file was modified at a backup destination."""
+    if not path:
+        return "warn", f"{label} backup: not configured"
+    
+    p = Path(path)
+    if not p.exists():
+        return "warn", f"{label} backup: path not accessible"
+    
+    try:
+        # Find the newest file
+        newest = None
+        for f in p.rglob("*"):
+            if f.is_file():
+                mtime = f.stat().st_mtime
+                if newest is None or mtime > newest:
+                    newest = mtime
+        
+        if newest is None:
+            return "warn", f"{label} backup: empty"
+        
+        age = datetime.now() - datetime.fromtimestamp(newest)
+        age_str = f"{age.days}d {age.seconds // 3600}h ago"
+        
+        if age > timedelta(days=2):
+            return "warn", f"{label} backup: stale ({age_str})"
+        return "ok", f"{label} backup: fresh ({age_str})"
+    except Exception as e:
+        return "warn", f"{label} backup: error — {e}"
+
+
+def check_offsite_backup():
+    """Check offsite backup freshness via SSH."""
+    remote = get_config("BACKUP_REMOTE")
+    if not remote:
+        return "warn", "offsite backup: not configured"
+    
+    try:
+        # Parse remote path
+        host, path = remote.split(":", 1)
+        result = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+             host, f"find {path} -type f -printf '%T@\\n' | sort -rn | head -1"],
+            capture_output=True, text=True, timeout=15
+        )
+        if result.returncode != 0:
+            return "warn", f"offsite backup: unreachable"
+        
+        newest = float(result.stdout.strip())
+        age = datetime.now() - datetime.fromtimestamp(newest)
+        age_str = f"{age.days}d {age.seconds // 3600}h ago"
+        
+        if age > timedelta(days=2):
+            return "warn", f"offsite backup: stale ({age_str})"
+        return "ok", f"offsite backup: fresh ({age_str})"
+    except Exception:
+        return "warn", "offsite backup: check failed"
+
+
+def check_services():
+    """Check if key services are running."""
+    issues = []
+    for svc in ["quiet-web", "quiet-discord"]:
+        try:
+            result = subprocess.run(
+                ["systemctl", "--user", "is-active", svc],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.stdout.strip() != "active":
+                issues.append(f"{svc}: not running")
+        except Exception:
+            issues.append(f"{svc}: check failed")
+    
+    if issues:
+        return "warn", "; ".join(issues)
+    return "ok", "services: all running"
+
+
+def check_updates():
+    """Check if there are updates available (git fetch, don't pull)."""
+    try:
+        subprocess.run(
+            ["git", "-C", str(QUIET_DIR), "fetch", "--quiet"],
+            capture_output=True, timeout=15
+        )
+        result = subprocess.run(
+            ["git", "-C", str(QUIET_DIR), "rev-list", "--count", "HEAD..origin/main"],
+            capture_output=True, text=True, timeout=5
+        )
+        behind = int(result.stdout.strip())
+        if behind > 0:
+            return "info", f"updates: {behind} commit(s) available"
+        return "ok", "updates: current"
+    except Exception:
+        return "ok", "updates: check skipped"
+
+
+def main():
+    checks = []
+    
+    # Memory
+    checks.append(check_memory())
+    
+    # Local backup
+    local_path = get_config("BACKUP_PATH")
+    checks.append(check_backup_freshness(local_path, "local"))
+    
+    # Offsite backup
+    checks.append(check_offsite_backup())
+    
+    # Services
+    checks.append(check_services())
+    
+    # Updates
+    checks.append(check_updates())
+    
+    # Determine overall status
+    statuses = [c[0] for c in checks]
+    if "fail" in statuses:
+        overall = "fail"
+    elif "warn" in statuses:
+        overall = "warn"
+    else:
+        overall = "ok"
+    
+    # Write full details to health.md
+    health_path = DATA_DIR / "health.md"
+    health_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(health_path, "w") as f:
+        f.write(f"# Health Check — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
+        for status, detail in checks:
+            marker = {"ok": "✓", "warn": "⚠", "fail": "✗", "info": "ℹ"}
+            f.write(f"- [{marker.get(status, '?')}] {detail}\n")
+        f.write(f"\nOverall: {overall}\n")
+    
+    # Generate ambient line
+    if overall == "ok":
+        # Check for info-level items (like available updates)
+        info_items = [c[1] for c in checks if c[0] == "info"]
+        if info_items:
+            ambient = f"[{info_items[0]}]"
+        else:
+            ambient = "[all well]"
+    else:
+        # Surface the most important non-ok item
+        problems = [c[1] for c in checks if c[0] in ("warn", "fail")]
+        ambient = f"[{problems[0]}]"
+    
+    print(ambient)
+    
+    # Also write ambient line to a file for ambient.md integration
+    ambient_health_path = DATA_DIR / "health-ambient.txt"
+    ambient_health_path.write_text(ambient + "\n")
+    
+    return 0 if overall != "fail" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
