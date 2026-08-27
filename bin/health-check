@@ -34,7 +34,14 @@ def get_config(key):
 
 
 def check_memory():
-    """Check memory database exists and has entries."""
+    """Check memory database exists, has entries, and dependencies are installed."""
+    # Check the dependency first — this is the root cause if memory is empty
+    try:
+        import importlib
+        importlib.import_module("sentence_transformers")
+    except ImportError:
+        return "fail", "memory: sentence_transformers not installed — ingestion cannot work"
+    
     db_path = DATA_DIR / "memory.db"
     if not db_path.exists():
         return "fail", "memory.db not found"
