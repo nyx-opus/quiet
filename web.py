@@ -386,7 +386,13 @@ def _patron_preflight(visitor: str) -> str | None:
         with open(marker) as f:
             active = f.read().strip()
     if not os.path.exists(want_file):
-        return active  # visitor isn't a patron; stay as we are
+        # Visitor isn't a patron: fall back to Amy (the house's founding
+        # patron hosts guests). Staying on whoever-was-last burned Erin's
+        # meter when Nic visited, 30 Aug. Fail-toward-Amy is policy.
+        want = "amy"
+        want_file = os.path.join(patrons_dir, "amy.json")
+        if not os.path.exists(want_file):
+            return active  # no amy blob either; nothing we can do
     if active == want:
         return active  # already right
     # sync live blob back to outgoing patron (capture SDK refreshes)
