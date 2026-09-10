@@ -122,6 +122,21 @@ def serialise_message(msg):
                 })
             else:
                 blocks.append({"type": "text", "text": str(block)})
+        # Guard: never save an assistant turn with no text content.
+        # Empty text blocks poison the session — the API rejects them
+        # with 'cache_control cannot be set for empty text blocks'.
+        # Disease A: three paths converge here (tool-only reply,
+        # no reply, mid-generation server error).
+        if msg.get("role") == "assistant":
+            has_text = any(
+                isinstance(b, dict) and b.get("type") == "text"
+                and b.get("text", "").strip()
+                for b in blocks
+            )
+            if not has_text:
+                blocks.append({"type": "text",
+                    "text": "[tools used; no spoken reply]"})
+
         result["content"] = blocks
     else:
         result["content"] = str(content)
@@ -233,14 +248,26 @@ def trim_context(messages: list, model: str, threshold: int,
     def estimate():
         total = 0
         for msg in messages:
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                total += len(content)
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        total += len(block.get("text", ""))
-        tokens = total // 4
+            # Count ALL content, not just text blocks.
+            # Tool calls, tool results, JSON structure all consume tokens.
+            # The old chars/4 on text-only undercounted ~3x (Fable's finding).
+            mc = msg.get("content", "")
+            if isinstance(mc, str):
+                total += len(mc)
+            elif isinstance(mc, list):
+                for block in mc:
+                    if isinstance(block, dict):
+                        # Count everything in the block
+                        total += len(json.dumps(block))
+                    elif hasattr(block, 'text'):
+                        total += len(block.text)
+                    else:
+                        total += len(str(block))
+            # Role and structure overhead per message
+            total += 20
+        # chars/3 is more conservative than chars/4 and closer to
+        # actual tokenization for mixed content (Fable measured 3x undercount)
+        tokens = total // 3
         if backend == "ccode":
             tokens += CCODE_OVERHEAD_TOKENS
         return tokens
@@ -297,6 +324,9 @@ def trim_context(messages: list, model: str, threshold: int,
         archive_path.parent.mkdir(parents=True, exist_ok=True)
         with open(archive_path, "a") as f:
             for msg in dropped:
+                # Skip header lines (no 'role' key) — they crash serialise_message
+                if "role" not in msg:
+                    continue
                 f.write(json.dumps(serialise_message(msg)) + "\n")
         # Ingest dropped messages into vector memory
         try:
