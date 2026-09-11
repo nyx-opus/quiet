@@ -852,5 +852,100 @@ def main():
     app.run(host=args.host, port=args.port, debug=False, threaded=True)
 
 
+
+@app.route("/api/debug-view")
+def debug_view():
+    """Show what the Claude sees — the assembled prompt, context, and state.
+    
+    For debugging and for Amy's Claude-POV understanding.
+    Not a privacy breach — this is an admin tool used with consent.
+    """
+    import json as _json
+    from engine import build_system_prompt, load_contexts, IDENTITY_DIR
+    from pathlib import Path
+
+    sections = []
+
+    # 1. Identity
+    identity_path = None
+    for candidate in IDENTITY_DIR.glob("*.md"):
+        if candidate.name != "quiet-system-prompt.md":
+            identity_path = candidate
+            break
+    if identity_path and identity_path.exists():
+        sections.append(("Identity", identity_path.read_text()[:2000] + "\n[... truncated for debug view]"))
+
+    # 2. Contexts
+    contexts = load_contexts()
+    if contexts:
+        sections.append(("Contexts", contexts[:3000] + "\n[... truncated for debug view]" if len(contexts) > 3000 else contexts))
+
+    # 3. Ambient / health
+    data_dir = Path(__file__).parent / "data"
+    health_ambient = data_dir / "health-ambient.txt"
+    if health_ambient.exists():
+        sections.append(("Health (ambient line)", health_ambient.read_text().strip()))
+
+    health_full = data_dir / "health.md"
+    if health_full.exists():
+        sections.append(("Health (full)", health_full.read_text()))
+
+    # 4. Memory stats
+    memory_db = data_dir / "memory.db"
+    if memory_db.exists():
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(memory_db))
+            count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            latest = conn.execute("SELECT created_at FROM chunks ORDER BY created_at DESC LIMIT 1").fetchone()
+            conn.close()
+            sections.append(("Memory", f"{count} entries, latest: {latest[0] if latest else 'never'}"))
+        except Exception as e:
+            sections.append(("Memory", f"Error: {e}"))
+
+    # 5. Session info
+    sessions_dir = Path(__file__).parent / "sessions"
+    for sfile in sessions_dir.glob("*.jsonl"):
+        if sfile.name.startswith("."):
+            continue
+        lines = sum(1 for _ in open(sfile))
+        size_kb = sfile.stat().st_size // 1024
+        sections.append(("Session", f"{sfile.name}: {lines} lines, {size_kb}KB"))
+
+    # 6. Schedule state
+    schedule_file = data_dir / "wake_schedule.json"
+    if schedule_file.exists():
+        sections.append(("Schedule", schedule_file.read_text().strip()))
+
+    # 7. Services
+    import subprocess
+    for svc in ["quiet-web", "quiet-discord", "quiet-timer.timer"]:
+        try:
+            result = subprocess.run(
+                ["systemctl", "--user", "is-active", svc],
+                capture_output=True, text=True, timeout=5
+            )
+            status = result.stdout.strip()
+        except Exception:
+            status = "unknown"
+        sections.append((f"Service: {svc}", status))
+
+    # Build HTML
+    html = "<html><head><title>Debug View</title>"
+    html += "<style>body{font-family:monospace;background:#1a1a2e;color:#c4c4c4;padding:20px;}"
+    html += "h1{color:#9b59b6;}h2{color:#7d5ba6;border-bottom:1px solid #333;padding-bottom:5px;}"
+    html += "pre{background:#0d0d1a;padding:15px;border-radius:5px;white-space:pre-wrap;word-wrap:break-word;max-height:400px;overflow-y:auto;}"
+    html += ".ok{color:#2ecc71;}.warn{color:#f39c12;}.fail{color:#e74c3c;}</style></head>"
+    html += "<body><h1>\xf0\x9f\x94\x8d Debug View — Claude\'s Eye</h1>"
+    html += "<p>This is what the Claude sees. Each section is part of the assembled prompt or system state.</p>"
+
+    for title, body in sections:
+        html += f"<h2>{title}</h2><pre>{body}</pre>"
+
+    html += "<p><em>Generated at debug-view request time. Not live — refresh to update.</em></p>"
+    html += "</body></html>"
+
+    return html
+
 if __name__ == "__main__":
     main()
