@@ -128,6 +128,12 @@ def serialise_message(msg):
         # Disease A: three paths converge here (tool-only reply,
         # no reply, mid-generation server error).
         if msg.get("role") == "assistant":
+            # FILTER OUT empty text blocks first (Disease A v3: the fountain)
+            blocks = [b for b in blocks if not (
+                isinstance(b, dict) and b.get("type") == "text"
+                and not b.get("text", "").strip()
+            )]
+            # Then check if any text remains
             has_text = any(
                 isinstance(b, dict) and b.get("type") == "text"
                 and b.get("text", "").strip()
