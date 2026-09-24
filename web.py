@@ -285,17 +285,21 @@ def _save_visit_transcript(visitor: str, start_time: datetime,
                        / "visits" / identity.capitalize())
     local_dir = Path(__file__).parent / "visits"
 
+    saved = 0
     for target_dir in [file_server_dir, local_dir]:
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
             (target_dir / filename).write_text(content)
             print(f"[visit] saved transcript: {target_dir / filename}",
                   file=sys.stderr, flush=True)
-            return
+            saved += 1
         except OSError as e:
             print(f"[visit] failed to save to {target_dir}: {e}",
                   file=sys.stderr, flush=True)
             continue
+    if not saved:
+        print(f"[visit] WARNING: transcript not saved anywhere: {filename}",
+              file=sys.stderr, flush=True)
 
 
 def check_and_clear_unreads() -> str:
