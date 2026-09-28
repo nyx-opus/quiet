@@ -453,38 +453,9 @@ class QuietEngine:
             repaired.append(msg)
 
         dropped = len(self.messages) - len(repaired)
-        # Detect ANY structural change: compare serialised content.
-        # (Counting blocks missed strip-then-placeholder heals, which
-        # leave counts equal — found by test, 28 Sept.)
-        import json as _json
-        changed = (dropped > 0 or
-                   _json.dumps(self.messages, sort_keys=True,
-                               default=str) !=
-                   _json.dumps(repaired, sort_keys=True, default=str))
-        changes = 1 if changed else 0
-        if dropped:
-            changes = dropped
         self.messages[:] = repaired
-        if changes:
-            print(f"[engine] _heal_messages: {dropped} message(s) "
-                  f"dropped, structure changed", file=sys.stderr,
-                  flush=True)
-        return changes
-
-    def _alert(self, text: str):
-        """Post an operational alert to #system-messages via
-        write_channel — the mama-hen line. Used for events a human
-        should know about even when nobody is watching the stream
-        (autonomous turns, discord-prompted turns). Never raises."""
-        try:
-            import subprocess
-            subprocess.run(
-                [str(Path.home() / "bin" / "write_channel"),
-                 "system-messages",
-                 f"🩺 [{(self.identity_name or 'quiet')}] {text}"],
-                capture_output=True, timeout=10)
-        except Exception:
-            pass  # alerting must never become its own disease
+        print(f"[engine] _heal_messages: {dropped} message(s) dropped, "
+              f"structure repaired", file=sys.stderr, flush=True)
 
     def trim_context(self):
         """Batch-drop oldest turns when context hits the trigger threshold.
@@ -1234,23 +1205,6 @@ class QuietEngine:
         except Exception:
             pass  # Memory recall is never worth breaking the conversation
 
-        # Prophylactic heal — every turn, before the API ever sees
-        # the context (Amy's design, 28 Sept): robust against reworded
-        # error messages and API drift, since structure is validated
-        # locally rather than diagnosed from rejection text. Cheap
-        # (in-memory list walk) and idempotent on healthy structure
-        # (tested). Loud when it changes anything — silent healing
-        # would mask disease occurrence.
-        try:
-            healed = self._heal_messages()
-            if healed:
-                self._alert(f"prophylactic heal fixed {healed} "
-                            f"structural issue(s) pre-call — poison "
-                            f"entered the session somewhere upstream")
-        except Exception as heal_err:
-            print(f"[engine] heal failed (non-fatal): {heal_err}",
-                  file=sys.stderr, flush=True)
-
         # Trim context if needed (all backends)
         self.trim_context()
 
@@ -1306,10 +1260,6 @@ class QuietEngine:
                     print(f"[engine] REFLEX: structural 400 detected — "
                           f"healing in place and retrying once",
                           file=sys.stderr, flush=True)
-                    self._alert(f"reflex caught structural 400 the "
-                                f"prophylactic missed: {err_text[:150]} "
-                                f"— healed and retrying (signature list "
-                                f"may want this wording added)")
                     self._heal_messages()
                     full_text = sdk_send(
                         self.messages,
@@ -1325,9 +1275,6 @@ class QuietEngine:
                         on_usage=on_usage,
                     )
                 else:
-                    self._alert(f"UNHANDLED API error on send: "
-                                f"{type(api_err).__name__}: "
-                                f"{err_text[:200]} — human needed")
                     raise
 
         # Check for room object interactions (e.g. *checks clock*)
