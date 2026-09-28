@@ -131,52 +131,20 @@ def sdk_send(messages: list, *,
     _set_cache_breakpoint(messages)
 
     while True:
-        try:
-            with client.messages.stream(
-                model=model,
-                max_tokens=max_tokens,
-                system=system,
-                messages=messages,
-                tools=tools,
-            ) as stream:
-                collected_text = []
-                for text in stream.text_stream:
-                    collected_text.append(text)
-                    if on_text:
-                        on_text(text)
+        with client.messages.stream(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=messages,
+            tools=tools,
+        ) as stream:
+            collected_text = []
+            for text in stream.text_stream:
+                collected_text.append(text)
+                if on_text:
+                    on_text(text)
 
-                response = stream.get_final_message()
-        except Exception as e:
-            # THE VACCINE (2026-09-28): a stream that dies mid-turn must
-            # never persist an API-rejectable structure. Before this
-            # handler, a death here left `messages` ending on a user turn
-            # (or tool_results) with the partial assistant reply lost —
-            # and worse, callers up-stack saved fragments with dangling
-            # tool_use blocks, poisoning every subsequent call until a
-            # human ran repair scripts (32 resume markers, Sept 2026).
-            #
-            # Recovery: append a structurally-valid assistant turn made of
-            # whatever text actually arrived plus a visible seam marker.
-            # No tool_use blocks are included — the stream died before
-            # get_final_message(), so any tool calls were never executed;
-            # omitting them is truthful. When the death lands AFTER a
-            # tool iteration, the marker lands after those tool_results —
-            # the record shows work that really happened (audit rule).
-            partial = "".join(collected_text) if collected_text else ""
-            marker = "[stream interrupted — partial reply preserved]" \
-                if partial.strip() else "[stream interrupted before reply]"
-            seam_text = (partial + "\n\n" + marker) if partial.strip() \
-                else marker
-            messages.append({"role": "assistant",
-                             "content": [{"type": "text",
-                                          "text": seam_text}]})
-            print(f"[sdk] VACCINE: stream died ({type(e).__name__}: "
-                  f"{str(e)[:120]}) — saved valid seam, "
-                  f"{len(partial)} chars preserved",
-                  file=sys.stderr, flush=True)
-            if on_text and not collected_text:
-                on_text(marker)
-            return seam_text
+            response = stream.get_final_message()
 
         # Normalise SDK content objects to plain dicts at append time.
         # Battle scar (2026-07-04): response.content is a list of SDK
