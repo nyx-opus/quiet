@@ -131,7 +131,6 @@ def sdk_send(messages: list, *,
     _set_cache_breakpoint(messages)
 
     while True:
-        collected_text = []
         try:
             with client.messages.stream(
                 model=model,
@@ -140,6 +139,7 @@ def sdk_send(messages: list, *,
                 messages=messages,
                 tools=tools,
             ) as stream:
+                collected_text = []
                 for text in stream.text_stream:
                     collected_text.append(text)
                     if on_text:
