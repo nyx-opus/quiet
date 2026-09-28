@@ -21,7 +21,6 @@ cache_control metadata so it doesn't persist to disk.
 """
 
 import sys
-import anthropic
 from typing import Callable
 from tools import execute_tool
 from session import normalise_content
@@ -147,8 +146,6 @@ def sdk_send(messages: list, *,
                         on_text(text)
 
                 response = stream.get_final_message()
-        except anthropic.BadRequestError:
-            raise  # Let 400s propagate to the engine's reflex handler
         except Exception as e:
             # THE VACCINE (2026-09-28): a stream that dies mid-turn must
             # never persist an API-rejectable structure. Before this

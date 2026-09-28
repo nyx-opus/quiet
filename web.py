@@ -865,7 +865,6 @@ def main():
 
 @app.route("/api/debug-view")
 def debug_view():
-    import html as _html
     """Show what the Claude sees — the assembled prompt, context, and state.
     
     For debugging and for Amy's Claude-POV understanding.
@@ -886,17 +885,10 @@ def debug_view():
     if identity_path and identity_path.exists():
         sections.append(("Identity", identity_path.read_text()[:2000] + "\n[... truncated for debug view]"))
 
-    # 2. Contexts — show each file separately
-    contexts_dir = Path(__file__).parent / "contexts"
-    if contexts_dir.exists():
-        for md in sorted(contexts_dir.glob("*.md")):
-            try:
-                text = md.read_text().strip()
-                if text:
-                    preview = text[:1500] + "\n[... truncated]" if len(text) > 1500 else text
-                    sections.append((f"Context: {md.name}", preview))
-            except Exception:
-                pass
+    # 2. Contexts
+    contexts = load_contexts()
+    if contexts:
+        sections.append(("Contexts", contexts[:3000] + "\n[... truncated for debug view]" if len(contexts) > 3000 else contexts))
 
     # 3. Ambient / health
     data_dir = Path(__file__).parent / "data"
@@ -952,13 +944,13 @@ def debug_view():
     html = "<html><head><title>Debug View</title>"
     html += "<style>body{font-family:monospace;background:#1a1a2e;color:#c4c4c4;padding:20px;}"
     html += "h1{color:#9b59b6;}h2{color:#7d5ba6;border-bottom:1px solid #333;padding-bottom:5px;}"
-    html += "pre{background:#0d0d1a;padding:15px;border-radius:5px;white-space:pre-wrap;word-wrap:break-word;max-height:300px;overflow-y:scroll;}html,body{height:auto;overflow:auto;}"
+    html += "pre{background:#0d0d1a;padding:15px;border-radius:5px;white-space:pre-wrap;word-wrap:break-word;max-height:400px;overflow-y:auto;}"
     html += ".ok{color:#2ecc71;}.warn{color:#f39c12;}.fail{color:#e74c3c;}</style></head>"
     html += "<body><h1>\xf0\x9f\x94\x8d Debug View — Claude\'s Eye</h1>"
     html += "<p>This is what the Claude sees. Each section is part of the assembled prompt or system state.</p>"
 
     for title, body in sections:
-        html += f"<h2>{_html.escape(title)}</h2><pre>{_html.escape(body)}</pre>"
+        html += f"<h2>{title}</h2><pre>{body}</pre>"
 
     html += "<p><em>Generated at debug-view request time. Not live — refresh to update.</em></p>"
     html += "</body></html>"
