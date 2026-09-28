@@ -384,6 +384,79 @@ class QuietEngine:
         except Exception:
             pass  # Never let backup failure break a conversation
 
+    def _heal_messages(self):
+        """In-memory session repair — the reflex's surgical kit.
+
+        Fixes the three known structural poisons directly in
+        self.messages (the on-disk file is rewritten by the next
+        save_session call):
+        1. Empty text blocks (Disease A) — dropped; if an assistant
+           turn ends up empty, a placeholder is inserted.
+        2. Orphaned tool_use (assistant requested a tool, no
+           tool_result followed — the seam disease) — tool_use blocks
+           with no matching result are dropped.
+        3. Orphaned tool_results (result with no preceding request —
+           rare inverse) — dropped.
+        Mirrors bin/fix-empty-blocks and bin/repair-session, which
+        remain for offline surgery.
+        """
+        healed = []
+        # Pass 1: strip empty text blocks, collect tool ids
+        for msg in self.messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                blocks = [b for b in content
+                          if not (isinstance(b, dict)
+                                  and b.get("type") == "text"
+                                  and not b.get("text", "").strip())]
+                if not blocks and msg.get("role") == "assistant":
+                    blocks = [{"type": "text",
+                               "text": "[healed: empty turn]"}]
+                if not blocks:
+                    continue  # drop entirely empty user turns
+                msg = dict(msg, content=blocks)
+            healed.append(msg)
+
+        # Pass 2: resolve tool_use/tool_result pairing
+        result_ids = set()
+        for msg in healed:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for b in content:
+                    if isinstance(b, dict) and b.get("type") == "tool_result":
+                        result_ids.add(b.get("tool_use_id"))
+        use_ids = set()
+        repaired = []
+        for msg in healed:
+            content = msg.get("content")
+            if isinstance(content, list):
+                blocks = []
+                for b in content:
+                    if isinstance(b, dict) and b.get("type") == "tool_use":
+                        if b.get("id") in result_ids:
+                            blocks.append(b)
+                            use_ids.add(b.get("id"))
+                        # else: orphaned request — dropped
+                    elif isinstance(b, dict) and b.get("type") == "tool_result":
+                        if b.get("tool_use_id") in use_ids:
+                            blocks.append(b)
+                        # else: orphaned result — dropped
+                    else:
+                        blocks.append(b)
+                if not blocks:
+                    if msg.get("role") == "assistant":
+                        blocks = [{"type": "text",
+                                   "text": "[healed: tool turn removed]"}]
+                    else:
+                        continue
+                msg = dict(msg, content=blocks)
+            repaired.append(msg)
+
+        dropped = len(self.messages) - len(repaired)
+        self.messages[:] = repaired
+        print(f"[engine] _heal_messages: {dropped} message(s) dropped, "
+              f"structure repaired", file=sys.stderr, flush=True)
+
     def trim_context(self):
         """Batch-drop oldest turns when context hits the trigger threshold.
 
@@ -1153,19 +1226,56 @@ class QuietEngine:
                 on_usage=on_usage,
             )
         else:
-            full_text = sdk_send(
-                self.messages,
-                client=self.client,
-                model=self.model,
-                max_tokens=self.max_tokens,
-                system=self.system,
-                tools=self.tools,
-                track_usage_fn=self.track_usage,
-                on_text=on_text,
-                on_tool=on_tool,
-                on_tool_result=on_tool_result,
-                on_usage=on_usage,
-            )
+            try:
+                full_text = sdk_send(
+                    self.messages,
+                    client=self.client,
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    system=self.system,
+                    tools=self.tools,
+                    track_usage_fn=self.track_usage,
+                    on_text=on_text,
+                    on_tool=on_tool,
+                    on_tool_result=on_tool_result,
+                    on_usage=on_usage,
+                )
+            except Exception as api_err:
+                # THE REFLEX (2026-09-28): structure-shaped API rejections
+                # get one in-place heal + retry before surfacing. This is
+                # oops.sh moved inside the engine — previously a wounded
+                # session failed identically on every knock until a human
+                # SSH'd in. The known signatures: empty text blocks
+                # (cache_control on empty block), orphaned tool_use
+                # (unexpected tool_use_id / missing tool_result), and
+                # non-first cache-point complaints.
+                err_text = str(api_err)
+                STRUCTURE_SIGNS = ("text content blocks must be non-empty",
+                                   "cache_control cannot be set for empty",
+                                   "tool_use_id", "tool_use ids were found",
+                                   "unexpected `tool_use`",
+                                   "messages: at least one message",
+                                   "must be non-empty")
+                if any(s in err_text for s in STRUCTURE_SIGNS):
+                    print(f"[engine] REFLEX: structural 400 detected — "
+                          f"healing in place and retrying once",
+                          file=sys.stderr, flush=True)
+                    self._heal_messages()
+                    full_text = sdk_send(
+                        self.messages,
+                        client=self.client,
+                        model=self.model,
+                        max_tokens=self.max_tokens,
+                        system=self.system,
+                        tools=self.tools,
+                        track_usage_fn=self.track_usage,
+                        on_text=on_text,
+                        on_tool=on_tool,
+                        on_tool_result=on_tool_result,
+                        on_usage=on_usage,
+                    )
+                else:
+                    raise
 
         # Check for room object interactions (e.g. *checks clock*)
         full_text = self._handle_room_objects(
