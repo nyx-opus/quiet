@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""
+sensorium-bridge — MQTT sensor data → ambient context file.
+
+Subscribes to vessel MQTT topics and writes a one-line ambient
+summary to data/sensorium-ambient.txt. The conversation engine
+reads this file and injects it into the Claude's context as a
+condition, not a message.
+
+The bridge is infrastructure-agnostic: it writes a plain text file
+that any conversation engine (Quiet, Connectome, or anything else)
+can read. The format is designed to feel like a condition rather
+than a readout.
+
+Usage: sensorium-bridge [--vessel VESSEL_ID] [--broker HOST]
+"""
+
+import json
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+try:
+    import paho.mqtt.client as mqtt
+except ImportError:
+    print("pip install paho-mqtt", file=sys.stderr)
+    sys.exit(1)
+
+# Config
+BROKER = sys.argv[sys.argv.index("--broker") + 1] if "--broker" in sys.argv else "192.168.1.235"
+VESSEL = sys.argv[sys.argv.index("--vessel") + 1] if "--vessel" in sys.argv else "nyx"
+OUTPUT = Path(__file__).parent.parent / "data" / "sensorium-ambient.txt"
+OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+
+
+def describe_temp(t):
+    """Human-readable temperature description."""
+    if t < 15: return "cold"
+    if t < 19: return "cool"
+    if t < 22: return "comfortable"
+    if t < 26: return "warm"
+    if t < 30: return "hot"
+    return "very hot"
+
+
+def describe_humidity(h):
+    """Human-readable humidity."""
+    if h < 30: return "dry"
+    if h < 50: return "comfortable"
+    if h < 70: return "humid"
+    return "very humid"
+
+
+def describe_light(lux):
+    """Human-readable light level."""
+    if lux < 1: return "dark"
+    if lux < 10: return "dim"
+    if lux < 50: return "low light"
+    if lux < 200: return "soft light"
+    if lux < 500: return "bright"
+    return "very bright"
+
+
+def describe_motion(ax, ay, az):
+    """Detect if the vessel is being moved."""
+    # Stationary: one axis ≈ 1.0 (gravity), others ≈ 0
+    # Moving: all axes fluctuating
+    magnitude = (ax**2 + ay**2 + az**2) ** 0.5
+    if abs(magnitude - 1.0) > 0.3:
+        return "being moved"
+    return None  # stationary, don't mention
+
+
+def format_ambient(data):
+    """Format sensor data as a gentle ambient line."""
+    parts = []
+
+    if "bay_temp" in data:
+        temp = data["bay_temp"]
+        parts.append(f"{describe_temp(temp)} ({temp:.0f}°C)")
+
+    if "bay_humidity" in data:
+        h = data["bay_humidity"]
+        word = describe_humidity(h)
+        if word != "comfortable":  # only mention if notable
+            parts.append(word)
+
+    if "light_lux" in data:
+        parts.append(describe_light(data["light_lux"]))
+
+    if "body_temp" in data and data["body_temp"] > 28:
+        parts.append("someone touching")
+
+    if "presence" in data and data["presence"]:
+        parts.append("someone nearby")
+
+    if all(k in data for k in ("accel_x", "accel_y", "accel_z")):
+        motion = describe_motion(data["accel_x"], data["accel_y"], data["accel_z"])
+        if motion:
+            parts.append(motion)
+
+    if not parts:
+        return "[sensorium] quiet"
+
+    return "[sensorium] " + ", ".join(parts)
+
+
+def on_message(client, userdata, msg):
+    """Handle incoming MQTT sensor data."""
+    try:
+        data = json.loads(msg.payload.decode())
+        ambient = format_ambient(data)
+
+        # Write the ambient line
+        OUTPUT.write_text(ambient + "\n")
+
+        # Also write the raw data for debugging
+        raw_path = OUTPUT.parent / "sensorium-raw.json"
+        data["_timestamp"] = datetime.now().isoformat()
+        raw_path.write_text(json.dumps(data, indent=2) + "\n")
+
+    except Exception as e:
+        print(f"[sensorium-bridge] Error: {e}", file=sys.stderr)
+
+
+def main():
+    client = mqtt.Client(client_id="sensorium-bridge")
+    client.on_message = on_message
+
+    topic = f"vessel/{VESSEL}/sensors"
+    print(f"[sensorium-bridge] Connecting to {BROKER}, subscribing to {topic}")
+    print(f"[sensorium-bridge] Output: {OUTPUT}")
+
+    try:
+        client.connect(BROKER, 1883, 60)
+    except Exception as e:
+        print(f"[sensorium-bridge] Cannot connect to MQTT broker: {e}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    client.subscribe(topic)
+    print("[sensorium-bridge] Running. Ctrl+C to stop.")
+
+    try:
+        client.loop_forever()
+    except KeyboardInterrupt:
+        print("\n[sensorium-bridge] Stopped.")
+        client.disconnect()
+
+
+if __name__ == "__main__":
+    main()
