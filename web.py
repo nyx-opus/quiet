@@ -281,7 +281,7 @@ def _save_visit_transcript(visitor: str, start_time: datetime,
 
     # Try file server first, fall back to local.
     # Transcripts belong to the VISITOR: they land in their gifts folder.
-    file_server_dir = (Path("/mnt/file_server/Gifts") / visitor.capitalize()
+    file_server_dir = (Path("/mnt/file_server") / visitor.capitalize()
                        / "visits" / identity.capitalize())
     local_dir = Path(__file__).parent / "visits"
 
