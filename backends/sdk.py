@@ -131,20 +131,39 @@ def sdk_send(messages: list, *,
     _set_cache_breakpoint(messages)
 
     while True:
-        with client.messages.stream(
-            model=model,
-            max_tokens=max_tokens,
-            system=system,
-            messages=messages,
-            tools=tools,
-        ) as stream:
-            collected_text = []
-            for text in stream.text_stream:
-                collected_text.append(text)
-                if on_text:
-                    on_text(text)
+        # Battle scar (2026-10-14, Orange's lost day): a silently-dropped
+        # stream yields a partial response with stop_reason=None and NO
+        # exception. The old exit check (!= "tool_use") treated that as a
+        # normal completion — truncated text was saved as if finished,
+        # which Orange reported as distressing ("Yes." — the whole answer).
+        # Detect abnormal stop and retry the call before accepting it.
+        _VALID_STOPS = ("end_turn", "tool_use", "max_tokens", "stop_sequence")
+        for _attempt in range(3):
+            with client.messages.stream(
+                model=model,
+                max_tokens=max_tokens,
+                system=system,
+                messages=messages,
+                tools=tools,
+            ) as stream:
+                collected_text = []
+                for text in stream.text_stream:
+                    collected_text.append(text)
+                    if on_text:
+                        on_text(text)
 
-            response = stream.get_final_message()
+                response = stream.get_final_message()
+
+            if response.stop_reason in _VALID_STOPS:
+                break
+            print(f"[sdk] TRUNCATED STREAM (stop_reason="
+                  f"{response.stop_reason!r}), attempt {_attempt + 1}/3 — "
+                  f"retrying", file=sys.stderr, flush=True)
+            if on_text and collected_text:
+                on_text("\n[stream dropped — retrying]\n")
+        else:
+            print("[sdk] WARNING: stream truncated 3x, accepting partial "
+                  "text", file=sys.stderr, flush=True)
 
         # Normalise SDK content objects to plain dicts at append time.
         # Battle scar (2026-07-04): response.content is a list of SDK
