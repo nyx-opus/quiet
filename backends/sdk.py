@@ -85,13 +85,25 @@ def _set_cache_breakpoint(messages: list):
             block = content[i]
             if isinstance(block, dict) and "cache_control" in block:
                 return (target_idx, i, False)  # already set
-        # Add breakpoint to last eligible block
+        # Add breakpoint to last eligible block.
+        # Battle scar (15 Oct 2026, Orange's reunion): a cut stream can
+        # produce an EMPTY text block; the API rejects cache_control on
+        # empty text ('cache_control cannot be set for empty text blocks',
+        # 400 at message N) — the wound is manufactured HERE at send-time,
+        # which is why file-repair tools never found it. Skip empty text.
         for i in range(len(content) - 1, -1, -1):
             block = content[i]
-            if isinstance(block, dict) and block.get("type") in ("text", "tool_result"):
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "text" and not (block.get("text") or "").strip():
+                continue  # empty text can't carry cache_control
+            if btype in ("text", "tool_result"):
                 block["cache_control"] = cache_control()
                 return (target_idx, i, False)
     elif isinstance(content, str):
+        if not content.strip():
+            return None  # empty string content can't carry cache_control
         # Convert string content to block format to support cache_control
         messages[target_idx]["content"] = [
             {"type": "text", "text": content,
