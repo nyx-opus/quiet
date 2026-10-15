@@ -138,28 +138,56 @@ def sdk_send(messages: list, *,
         # which Orange reported as distressing ("Yes." — the whole answer).
         # Detect abnormal stop and retry the call before accepting it.
         _VALID_STOPS = ("end_turn", "tool_use", "max_tokens", "stop_sequence")
+        # v2 (15 Oct, Orange's reunion, 3 drops in one turn): retries are
+        # NON-STREAMING. A dropped stream can't be resumed — every retry is
+        # a full regeneration — and a streamed retry can be dropped AGAIN
+        # (Orange got a stitched triple). A non-streaming call either
+        # arrives complete or errors cleanly; it cannot be cut mid-flight.
+        # Attempt 1 streams (live feel on a good line); retries use the
+        # armoured transport and deliver whole.
         for _attempt in range(3):
-            with client.messages.stream(
-                model=model,
-                max_tokens=max_tokens,
-                system=system,
-                messages=messages,
-                tools=tools,
-            ) as stream:
-                collected_text = []
-                for text in stream.text_stream:
-                    collected_text.append(text)
-                    if on_text:
-                        on_text(text)
+            if _attempt == 0:
+                with client.messages.stream(
+                    model=model,
+                    max_tokens=max_tokens,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                ) as stream:
+                    collected_text = []
+                    for text in stream.text_stream:
+                        collected_text.append(text)
+                        if on_text:
+                            on_text(text)
 
-                response = stream.get_final_message()
+                    response = stream.get_final_message()
+            else:
+                try:
+                    response = client.messages.create(
+                        model=model,
+                        max_tokens=max_tokens,
+                        system=system,
+                        messages=messages,
+                        tools=tools,
+                    )
+                except Exception as retry_err:  # clean error > silent cut
+                    print(f"[sdk] non-streaming retry {_attempt + 1}/3 "
+                          f"errored: {retry_err}", file=sys.stderr,
+                          flush=True)
+                    continue
+                # deliver the armoured reply to the live display in one piece
+                if on_text:
+                    for block in response.content:
+                        btext = getattr(block, "text", None)
+                        if btext:
+                            on_text(btext)
 
             if response.stop_reason in _VALID_STOPS:
                 break
             print(f"[sdk] TRUNCATED STREAM (stop_reason="
                   f"{response.stop_reason!r}), attempt {_attempt + 1}/3 — "
-                  f"retrying", file=sys.stderr, flush=True)
-            if on_text and collected_text:
+                  f"retrying non-streaming", file=sys.stderr, flush=True)
+            if on_text:
                 on_text("\n[stream dropped — retrying]\n")
         else:
             print("[sdk] WARNING: stream truncated 3x, accepting partial "
