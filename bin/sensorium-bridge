@@ -115,10 +115,15 @@ def on_message(client, userdata, msg):
         # Write the ambient line
         OUTPUT.write_text(ambient + "\n")
 
-        # Also write the raw data for debugging
+        # Also write the raw data for debugging (overwrite)
         raw_path = OUTPUT.parent / "sensorium-raw.json"
         data["_timestamp"] = datetime.now().isoformat()
         raw_path.write_text(json.dumps(data, indent=2) + "\n")
+
+        # Append to the time-series log (the house's heartbeat)
+        log_path = OUTPUT.parent / "sensorium-log.jsonl"
+        with open(log_path, "a") as log:
+            log.write(json.dumps(data) + "\n")
 
     except Exception as e:
         print(f"[sensorium-bridge] Error: {e}", file=sys.stderr)
