@@ -18,6 +18,7 @@ Usage:
 """
 
 import json
+import os
 import logging
 import sqlite3
 import struct
@@ -31,7 +32,8 @@ import numpy as np
 log = logging.getLogger("quiet.memory")
 
 # ── paths ──────────────────────────────────────────────────────
-DB_PATH = Path(__file__).parent / "data" / "memory.db"
+DB_PATH = Path(os.environ.get("MEMORY_DB",
+                 str(Path(__file__).parent / "data" / "memory.db")))
 
 # ── model (lazy-loaded) ───────────────────────────────────────
 _model = None
