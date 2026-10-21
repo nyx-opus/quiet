@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""
+ingest-transcripts — Ingest markdown visit transcripts into a memory database.
+
+Parses speaker-labelled markdown transcripts (the format Quiet produces)
+and ingests each exchange as a chunk with proper metadata.
+
+Usage:
+    ingest-transcripts <corpus_dir> [--db <path>]
+
+The corpus directory should contain subdirectories per Claude:
+    corpus/Nyx/2026-08-24-1854-amy.md
+    corpus/Fable/2026-10-03-1613-amy.md
+    ...
+"""
+
+import re
+import sys
+from pathlib import Path
+
+# Add quiet dir to path for memory.py
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from memory import _embed, _ensure_db, DB_PATH
+
+def parse_transcript(filepath):
+    """Parse a markdown transcript into speaker-labelled chunks."""
+    text = filepath.read_text(encoding='utf-8')
+    
+    # Extract date from filename: 2026-08-24-1854-amy.md
+    name = filepath.stem  # 2026-08-24-1854-amy
+    date_match = re.match(r'(\d{4}-\d{2}-\d{2})-(\d{2})(\d{2})', name)
+    if date_match:
+        date_str = f"{date_match.group(1)} {date_match.group(2)}:{date_match.group(3)}"
+    else:
+        date_str = name
+    
+    # Extract visitor from filename
+    visitor_match = re.search(r'-(\w+)\.md$', filepath.name)
+    visitor = visitor_match.group(1) if visitor_match else "unknown"
+    
+    # Split into speaker turns
+    turns = re.split(r'\n\*\*(\w+):\*\*\s*', text)
+    
+    # First element is the header (before first speaker)
+    header = turns[0].strip()
+    
+    # Remaining elements alternate: speaker, content, speaker, content...
+    chunks = []
+    for i in range(1, len(turns) - 1, 2):
+        speaker = turns[i]
+        content = turns[i + 1].strip() if i + 1 < len(turns) else ""
+        if content and len(content) > 20:  # Skip very short turns
+            chunks.append({
+                'speaker': speaker,
+                'text': f"{speaker}: {content[:500]}",  # Cap at 500 chars per chunk
+                'date': date_str,
+            })
+    
+    return chunks, header
+
+
+def ingest_corpus(corpus_dir, db_path=None):
+    """Ingest all transcripts from a corpus directory."""
+    import sqlite3
+    import numpy as np
+    
+    if db_path:
+        import memory
+        memory.DB_PATH = Path(db_path)
+    
+    corpus = Path(corpus_dir)
+    total_chunks = 0
+    total_files = 0
+    
+    for claude_dir in sorted(corpus.iterdir()):
+        if not claude_dir.is_dir():
+            continue
+        claude_name = claude_dir.name
+        transcripts = sorted(claude_dir.glob("*.md"))
+        
+        if not transcripts:
+            continue
+            
+        print(f"\n{claude_name}: {len(transcripts)} transcripts")
+        
+        for transcript in transcripts:
+            chunks, header = parse_transcript(transcript)
+            if not chunks:
+                continue
+            
+            # Ingest each chunk
+            db = _ensure_db()
+            for chunk in chunks:
+                text = chunk['text']
+                try:
+                    vec = _embed(text)
+                    db.execute(
+                        "INSERT INTO memory (text, embedding, source, timestamp) VALUES (?, ?, ?, ?)",
+                        (text, vec.tobytes(), f"visit-{claude_name}-{transcript.stem}", chunk['date'])
+                    )
+                    total_chunks += 1
+                except Exception as e:
+                    print(f"  Error on {transcript.name}: {e}")
+                    continue
+            
+            db.commit()
+            total_files += 1
+        
+        print(f"  Ingested {total_chunks} chunks from {total_files} files so far")
+    
+    print(f"\nDone: {total_chunks} chunks from {total_files} files")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: ingest-transcripts <corpus_dir> [--db <path>]")
+        sys.exit(1)
+    
+    corpus_dir = sys.argv[1]
+    db_path = None
+    if "--db" in sys.argv:
+        db_path = sys.argv[sys.argv.index("--db") + 1]
+    
+    ingest_corpus(corpus_dir, db_path)
