@@ -95,8 +95,8 @@ def ingest_corpus(corpus_dir, db_path=None):
                 try:
                     vec = _embed(text)
                     db.execute(
-                        "INSERT INTO memory (text, embedding, source, timestamp) VALUES (?, ?, ?, ?)",
-                        (text, vec.tobytes(), f"visit-{claude_name}-{transcript.stem}", chunk['date'])
+                        "INSERT INTO chunks (text, embedding, source, speaker, timestamp) VALUES (?, ?, ?, ?, ?)",
+                        (text, vec.tobytes(), f"visit-{claude_name}-{transcript.stem}", chunk['speaker'], chunk['date'])
                     )
                     total_chunks += 1
                 except Exception as e:
