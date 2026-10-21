@@ -20,7 +20,7 @@ from pathlib import Path
 
 # Add quiet dir to path for memory.py
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from memory import _embed, _ensure_db, DB_PATH
+from memory import _embed, _get_db, DB_PATH
 
 def parse_transcript(filepath):
     """Parse a markdown transcript into speaker-labelled chunks."""
@@ -89,7 +89,7 @@ def ingest_corpus(corpus_dir, db_path=None):
                 continue
             
             # Ingest each chunk
-            db = _ensure_db()
+            db = _get_db()
             for chunk in chunks:
                 text = chunk['text']
                 try:
